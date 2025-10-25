@@ -66,6 +66,7 @@ from flow_matching.solver import ModelWrapper
 from flow_matching.utils import set_seed
 
 from flow_matching.fmx import fmx_objective_and_metric
+from flow_matching.fast_fmx import CurlFreeRFF, fast_fmx_loss
 
 
 class Swish(Module):
@@ -124,11 +125,13 @@ def main():
     parser.add_argument("--dataset", type=str, choices=TOY_DATASETS.keys(), required=True)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--loss", choices=["cfm", "fmx", "cfmx"], default="cfm")
-    parser.add_argument("--batch_size", type=int, default=None, help="Batch size (default: 4096 for CFM, 256 for FMX/CFMX)")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size (default: 4096 for CFM, 2048 for FMX/CFMX with RFF, 256 without RFF)")
+    parser.add_argument("--fmx_use_rff", action="store_true", help="Use fast Random Fourier Features (O(BD) vs O(B²) exact kernel)")
+    parser.add_argument("--fmx_rff_dim", type=int, default=256, help="Number of random features for RFF (128-512)")
     parser.add_argument("--fmx_sigma", type=float, default=1.0, help="Manual sigma (ignored if fmx_auto_sigma=True)")
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
     parser.add_argument("--fmx_steps", type=int, default=32, help="Euler steps for non-conditional FMX")
-    parser.add_argument("--fmx_ridge", type=float, default=1e-6, help="Ridge regularization for kernel stability")
+    parser.add_argument("--fmx_ridge", type=float, default=1e-6, help="Ridge regularization for exact kernel stability")
     parser.add_argument("--cfmx_sigma_base", type=float, default=0.15, help="Base noise level for noisy CFMX bridge")
     parser.add_argument("--cfmx_lambda_vel", type=float, default=0.1, help="Weight for velocity anchor term")
     args = parser.parse_args()
@@ -146,9 +149,12 @@ def main():
     # Training parameters
     # Lower LR for (C)FMX since Hessian kernels are sharper
     learning_rate = 5e-4 if args.loss in ("fmx", "cfmx") else 1e-3
-    # Smaller batch for FMX/CFMX due to O(B²) kernel computation (memory & time)
+    # Batch size: depends on whether using RFF (fast, O(BD)) or exact kernel (slow, O(B²))
     if args.batch_size is None:
-        batch_size = 256 if args.loss in ("fmx", "cfmx") else 4096
+        if args.loss in ("fmx", "cfmx"):
+            batch_size = 2048 if args.fmx_use_rff else 256
+        else:
+            batch_size = 4096
     else:
         batch_size = args.batch_size
     iterations = 20000
@@ -156,11 +162,20 @@ def main():
     hidden_dim = 512
 
     print(f"Batch size: {batch_size}")
+    if args.loss in ("fmx", "cfmx"):
+        print(f"FMX mode: {'RFF (fast, O(BD))' if args.fmx_use_rff else 'Exact kernel (slow, O(B²))'}")
 
     dataset = TOY_DATASETS[args.dataset](device=device)
 
     flow = Mlp(dim=dataset.dim, time_dim=1, h=hidden_dim).to(device)
     optimizer = torch.optim.AdamW(flow.parameters(), learning_rate)
+
+    # Initialize RFF for fast FMX (if enabled)
+    rff = None
+    if args.loss in ("fmx", "cfmx") and args.fmx_use_rff:
+        # Initialize with default sigma, will update adaptively during training
+        rff = CurlFreeRFF(d=dataset.dim, D=args.fmx_rff_dim, sigma=args.cfmx_sigma_base).to(device)
+        print(f"Using RFF with D={args.fmx_rff_dim} features")
 
     # EMA for sigma (stability for FMX/CFMX)
     sigma_ema = None
@@ -223,12 +238,20 @@ def main():
                 sigma_used = float(sigma_t.mean().clamp(min=1e-2))
 
             # Compute objective and metric
-            obj, mmd2 = fmx_objective_and_metric(
-                Xm_f, vm_f, Xr_f, vr_f,
-                sigma=sigma_used,
-                use_auto_sigma=False,
-                ridge=args.fmx_ridge,
-            )
+            if args.fmx_use_rff:
+                # Fast RFF-based FMX: O(BD) complexity
+                # Update RFF bandwidth to match current sigma_t
+                if global_step % 1000 == 0:  # Re-sample features periodically
+                    rff.update_sigma(sigma_used)
+                obj, mmd2 = fast_fmx_loss(rff, Xm_f, vm_f, Xr_f, vr_f)
+            else:
+                # Exact kernel-based FMX: O(B²) complexity
+                obj, mmd2 = fmx_objective_and_metric(
+                    Xm_f, vm_f, Xr_f, vr_f,
+                    sigma=sigma_used,
+                    use_auto_sigma=False,
+                    ridge=args.fmx_ridge,
+                )
 
             # Add velocity anchor for well-conditioned optimization (hybrid approach)
             # For CFMX, vm is already computed at x_t, so reuse it
