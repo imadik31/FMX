@@ -71,7 +71,14 @@ def fmx_loss(
 
     vm_col = vm[:, None, :, None]  # [B, 1, d, 1]
     vm_row = vm[None, :, None, :]  # [1, B, 1, d]
-    term_mm = (vm_col * Kmm * vm_row).sum(dim=(-1, -2)).mean()
+    mm_matrix = (vm_col * Kmm * vm_row).sum(dim=(-1, -2))  # [B, B]
+
+    # Drop the diagonal to obtain the unbiased estimator and stabilise the loss magnitude.
+    diag = torch.diagonal(mm_matrix)
+    if mm_matrix.size(0) > 1:
+        term_mm = (mm_matrix.sum() - diag.sum()) / (mm_matrix.size(0) * (mm_matrix.size(0) - 1))
+    else:
+        term_mm = mm_matrix.mean()
 
     vr_row = vr[None, :, None, :]  # [1, B_r, 1, d]
     term_mr = (vm_col * Kmr * vr_row).sum(dim=(-1, -2)).mean()
