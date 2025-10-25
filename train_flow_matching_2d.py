@@ -1,3 +1,25 @@
+"""
+Training script for 2D toy datasets with Flow Matching variants.
+
+Supports three loss types:
+1. CFM (Conditional Flow Matching): Standard velocity regression at conditional bridge points.
+   - Loss: MSE between v_θ(x_t, t) and (x₁ - x₀)
+   - Fastest and most stable baseline
+
+2. CFMX (Conditional Flux Matching): Flux matching at conditional bridge points.
+   - Loss: Flux-MMD² between model and reference flux at x_t = (1-t)x₀ + tx₁
+   - Like CFM but matches full flux (position + velocity) using operator-valued kernels
+   - Recommended over FMX for better stability
+
+3. FMX (Flux Matching): Non-conditional flux matching with pushed particles.
+   - Loss: Flux-MMD² between pushed model particles and reference
+   - Model particles obtained by integrating from x₀ to time t
+   - More expensive (requires ODE integration) and less stable
+
+Usage:
+  python train_flow_matching_2d.py --dataset moons --loss cfmx --fmx_auto_sigma
+"""
+
 import argparse
 from pathlib import Path
 
@@ -14,7 +36,6 @@ from flow_matching.datasets import TOY_DATASETS
 from flow_matching.solver import ModelWrapper
 from flow_matching.utils import set_seed
 
-# NEW: FMX loss
 from flow_matching.fmx import fmx_loss
 
 
@@ -71,10 +92,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, choices=TOY_DATASETS.keys(), required=True)
     parser.add_argument("--output-dir", type=str, default="outputs")
-    parser.add_argument("--loss", choices=["cfm", "fmx"], default="cfm")
+    parser.add_argument("--loss", choices=["cfm", "fmx", "cfmx"], default="cfm")
     parser.add_argument("--fmx_sigma", type=float, default=1.0)
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
-    parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t
+    parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t (only for non-conditional FMX)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -117,8 +138,29 @@ def main():
             # Original CFM: regress velocity on reference points
             v_pred = flow(x_t=x_t, t=t)
             loss = F.mse_loss(v_pred, dx_t)
-        else:
-            # -------- Flux Matching (FMX) --------
+
+        elif args.loss == "cfmx":
+            # -------- Conditional Flux Matching (CFMX) --------
+            # Like CFM, we evaluate both reference and model at the conditional bridge points.
+            # Reference flux from the linear bridge x_t = (1-t)x₀ + tx₁:
+            Xr, vr = x_t.detach(), dx_t.detach()
+
+            # Model flux at the SAME conditional bridge points (not pushed through the flow):
+            Xm = x_t  # Evaluate at the same positions as reference
+            vm = flow(x_t=Xm, t=t)  # Model velocity at conditional bridge points
+
+            # Match fluxes using operator-valued kernel
+            loss = fmx_loss(
+                Xm=Xm.reshape(Xm.size(0), -1),
+                vm=vm.reshape(vm.size(0), -1),
+                Xr=Xr.reshape(Xr.size(0), -1),
+                vr=vr.reshape(vr.size(0), -1),
+                sigma=args.fmx_sigma,
+                auto_sigma=args.fmx_auto_sigma,
+            )
+
+        else:  # args.loss == "fmx"
+            # -------- Flux Matching (FMX) - non-conditional --------
             # Reference flux samples (positions & velocities) from the linear bridge:
             Xr, vr = x_t.detach(), dx_t.detach()
 

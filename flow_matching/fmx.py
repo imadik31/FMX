@@ -1,9 +1,17 @@
 """
-Flux Matching (FMX) loss implementation.
+Flux Matching (FMX) and Conditional Flux Matching (CFMX) loss implementations.
 
 This module implements the Flux-MMD^2 loss with operator-valued kernel,
 which matches the flux (joint distribution of positions and velocities)
 between the model and reference distributions.
+
+Two variants:
+1. FMX: Model particles are pushed through the learned flow from x₀ to time t.
+2. CFMX: Model and reference are evaluated at the same conditional bridge points
+   x_t = (1-t)x₀ + tx₁, analogous to Conditional Flow Matching (CFM).
+
+CFMX is generally more stable and easier to train, as it directly mirrors
+the CFM approach but with flux matching instead of velocity regression.
 """
 
 import torch
