@@ -124,6 +124,7 @@ def main():
     parser.add_argument("--dataset", type=str, choices=TOY_DATASETS.keys(), required=True)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--loss", choices=["cfm", "fmx", "cfmx"], default="cfm")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size (default: 4096 for CFM, 256 for FMX/CFMX)")
     parser.add_argument("--fmx_sigma", type=float, default=1.0, help="Manual sigma (ignored if fmx_auto_sigma=True)")
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
     parser.add_argument("--fmx_steps", type=int, default=32, help="Euler steps for non-conditional FMX")
@@ -145,10 +146,16 @@ def main():
     # Training parameters
     # Lower LR for (C)FMX since Hessian kernels are sharper
     learning_rate = 5e-4 if args.loss in ("fmx", "cfmx") else 1e-3
-    batch_size = 4096
+    # Smaller batch for FMX/CFMX due to O(B²) kernel computation (memory & time)
+    if args.batch_size is None:
+        batch_size = 256 if args.loss in ("fmx", "cfmx") else 4096
+    else:
+        batch_size = args.batch_size
     iterations = 20000
     log_every = 2000
     hidden_dim = 512
+
+    print(f"Batch size: {batch_size}")
 
     dataset = TOY_DATASETS[args.dataset](device=device)
 
