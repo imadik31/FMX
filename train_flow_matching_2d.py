@@ -195,10 +195,15 @@ def main():
             # Reference flux from conditional bridge: positions Xr and velocities vr
             Xr, vr = x_t.detach(), dx_t.detach()
 
-            # Model particles at time t (push through current flow)
-            with torch.no_grad():
-                Xm = push_to_time(flow, x_0.detach(), t.detach(), n_steps=args.fmx_steps)
-            vm = flow(x_t=Xm, t=t)
+            if args.loss == "fmx":
+                # Non-conditional FMX: integrate model particles from noise to time t
+                with torch.no_grad():
+                    Xm = push_to_time(flow, x_0.detach(), t.detach(), n_steps=args.fmx_steps)
+                vm = flow(x_t=Xm, t=t)
+            else:
+                # CFMX: Both model and reference at the same conditional bridge points (like CFM)
+                Xm = x_t  # Model at same bridge points - no integration needed!
+                vm = flow(x_t=Xm, t=t)
 
             # Flatten to [B, d]
             Xm_f = Xm.reshape(Xm.size(0), -1)
@@ -219,8 +224,8 @@ def main():
             )
 
             # Add velocity anchor for well-conditioned optimization (hybrid approach)
-            v_pred_ref = flow(x_t=x_t, t=t)
-            vel_mse = F.mse_loss(v_pred_ref, dx_t)
+            # For CFMX, vm is already computed at x_t, so reuse it
+            vel_mse = F.mse_loss(vm, dx_t)
 
             # Combined loss: flux matching + velocity anchor
             loss = obj + args.cfmx_lambda_vel * vel_mse
