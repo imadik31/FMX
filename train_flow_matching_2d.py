@@ -82,19 +82,21 @@ class Mlp(Module):
 
 def push_to_time(vnet: Mlp, x0: Tensor, t: Tensor, n_steps: int = 32) -> Tensor:
     """
-    Simple fixed-step Euler integrator to push base samples x0 from time 0 to time t.
+    Per-sample Euler integrator: push each x0[i] from time 0 to its own t[i].
     x0: [B,d], t: [B,1] or [B]; returns x_t ~ p_{t,theta}.
     """
     if t.ndim == 1:
-        t = t[:, None]
-    # Use a scalar dt (same for the batch); you can switch to per-sample stepping if desired.
-    dt = (t.max() - 0.0) / n_steps
+        t = t[:, None]  # [B, 1]
+
+    # Per-sample step size: each particle integrates to its own time
+    dt = t / n_steps  # [B, 1]
     x = x0
-    tau = 0.0
+    tau = torch.zeros_like(t)  # [B, 1] - start at time 0 for all
+
     for _ in range(n_steps):
-        tau = tau + dt
-        tau_tensor = torch.ones_like(x[:, :1]) * tau  # [B,1]
-        x = x + dt * vnet(x_t=x, t=tau_tensor)
+        tau = tau + dt  # each sample advances toward its own t[i]
+        x = x + dt * vnet(x_t=x, t=tau)
+
     return x
 
 
@@ -131,6 +133,10 @@ def main():
 
     flow = Mlp(dim=dataset.dim, time_dim=1, h=hidden_dim).to(device)
     optimizer = torch.optim.AdamW(flow.parameters(), learning_rate)
+
+    # EMA for sigma (stability for FMX/CFMX)
+    sigma_ema = None
+    ema_momentum = 0.9
 
     # Training
     losses = []
@@ -171,11 +177,25 @@ def main():
             Xr_f = Xr.reshape(Xr.size(0), -1)
             vr_f = vr.reshape(vr.size(0), -1)
 
-            # Compute objective and metric
+            # Compute sigma with EMA for stability
+            if args.fmx_auto_sigma:
+                from flow_matching.fmx import median_heuristic_sigma
+                with torch.no_grad():
+                    sigma_now = median_heuristic_sigma(Xm_f.detach(), Xr_f.detach())
+                    sigma_now = max(0.5 * sigma_now, 1e-2)
+                    if sigma_ema is None:
+                        sigma_ema = sigma_now
+                    else:
+                        sigma_ema = ema_momentum * sigma_ema + (1 - ema_momentum) * sigma_now
+                sigma_used = sigma_ema
+            else:
+                sigma_used = args.fmx_sigma
+
+            # Compute objective and metric with fixed sigma
             obj, mmd2 = fmx_objective_and_metric(
                 Xm_f, vm_f, Xr_f, vr_f,
-                sigma=(None if args.fmx_auto_sigma else args.fmx_sigma),
-                use_auto_sigma=args.fmx_auto_sigma,
+                sigma=sigma_used,
+                use_auto_sigma=False,  # sigma already computed above
                 ridge=args.fmx_ridge,
             )
 
@@ -186,7 +206,9 @@ def main():
             optimizer.step()
 
             # Log the non-negative metric (not the objective!)
-            losses.append(float(mmd2.detach().cpu()))
+            mmd2_val = float(mmd2.detach().cpu())
+            assert mmd2_val >= -1e-5, f"mmd2 should be non-negative, got {mmd2_val}"  # allow tiny numerical error
+            losses.append(max(0.0, mmd2_val))  # clamp to 0 if slightly negative due to numerical error
 
         if (global_step + 1) % log_every == 0:
             # Print the last logged loss value
