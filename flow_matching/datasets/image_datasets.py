@@ -1,6 +1,5 @@
-from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from torch.utils.data import Dataset
