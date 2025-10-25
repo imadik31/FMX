@@ -1,11 +1,13 @@
 import random
 
+from typing import Union
+
 import numpy as np
 import torch
 from torch import Tensor, nn
 
 
-def expand_t_like_x(t: float | Tensor, x: Tensor) -> Tensor:
+def expand_t_like_x(t: Union[float, Tensor], x: Tensor) -> Tensor:
     """Expand time vector t to match the shape of tensor x without making a copy.
 
     Args:

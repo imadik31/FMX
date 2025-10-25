@@ -1,6 +1,8 @@
 import pickle
 from pathlib import Path
 
+from typing import List, Optional
+
 import numpy as np
 import torch
 from PIL import Image
@@ -27,7 +29,7 @@ class SyntheticDataset:
         """
         raise NotImplementedError
 
-    def get_square_range(self, samples: torch.Tensor | None = None) -> list[list[float]]:
+    def get_square_range(self, samples: Optional[torch.Tensor] = None) -> List[List[float]]:
         """Compute the range of the samples for plotting"""
 
         assert self.dim == 2, "Only 2D datasets are supported for now"
