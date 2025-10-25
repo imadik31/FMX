@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from pathlib import Path
 
+from typing import Optional
+
 import torch
 from torch.utils.data import Dataset
 from torchvision.datasets import CIFAR10, MNIST, CelebA, FashionMNIST
@@ -11,7 +13,7 @@ def get_image_dataset(
     dataset_name: str,
     root: str = Path(__file__).parents[2] / "data",
     train: bool = True,
-    transform: Callable | None = None,
+    transform: Optional[Callable] = None,
 ) -> Dataset:
     if dataset_name == "mnist":
         return MNIST(root, train, transform, download=True)
