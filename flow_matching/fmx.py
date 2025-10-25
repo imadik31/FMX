@@ -172,15 +172,21 @@ def fmx_objective_and_metric(
     else:
         sigma_val = float(sigma)
 
-    Kmm = rbf_ovk_hessian(Xm, Xm, sigma=sigma_val, ridge=ridge)   # [B,B,d,d]
-    Kmr = rbf_ovk_hessian(Xm, Xr, sigma=sigma_val, ridge=0.0)     # [B,Br,d,d]
-    Krr = rbf_ovk_hessian(Xr, Xr, sigma=sigma_val, ridge=ridge)   # [Br,Br,d,d]
+    # === Compute in float64 for numerical stability ===
+    # This reduces finite-sample bias from FP32 roundoff errors
+    Xm64, vm64 = Xm.to(torch.float64), vm.to(torch.float64)
+    Xr64, vr64 = Xr.to(torch.float64), vr.to(torch.float64)
+
+    Kmm = rbf_ovk_hessian(Xm64, Xm64, sigma=sigma_val, ridge=ridge)   # [B,B,d,d], float64
+    Kmr = rbf_ovk_hessian(Xm64, Xr64, sigma=sigma_val, ridge=0.0)     # [B,Br,d,d], float64
+    Krr = rbf_ovk_hessian(Xr64, Xr64, sigma=sigma_val, ridge=ridge)   # [Br,Br,d,d], float64
 
     # Use U-statistic (no self-pairs) for Kmm and Krr to reduce finite-sample bias
-    term_mm = _quad_form_U(vm, Kmm, vm)     # E[J,J]
-    term_mr = _quad_form_U(vm, Kmr, vr)     # E[J,J*]
-    term_rr = _quad_form_U(vr, Krr, vr)     # E[J*,J*]  (const wrt θ)
+    term_mm = _quad_form_U(vm64, Kmm, vm64)     # E[J,J], float64
+    term_mr = _quad_form_U(vm64, Kmr, vr64)     # E[J,J*], float64
+    term_rr = _quad_form_U(vr64, Krr, vr64)     # E[J*,J*], float64
 
-    obj  = term_mm - 2.0 * term_mr        # what we minimize (same grads as before)
-    mmd2 = obj + term_rr                   # non-negative metric to log
+    # Convert back to original dtype
+    obj  = (term_mm - 2.0 * term_mr).to(Xm.dtype)        # what we minimize (same grads as before)
+    mmd2 = (obj + term_rr.to(obj.dtype))                 # non-negative metric to log
     return obj, mmd2
