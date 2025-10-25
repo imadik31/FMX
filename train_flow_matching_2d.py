@@ -7,14 +7,20 @@ Supports three loss types:
    - Fastest and most stable baseline
 
 2. CFMX (Conditional Flux Matching): Flux matching at conditional bridge points.
-   - Loss: Flux-MMD² between model and reference flux at x_t = (1-t)x₀ + tx₁
-   - Like CFM but matches full flux (position + velocity) using operator-valued kernels
-   - Recommended over FMX for better stability
+   - Objective: E[J,J] - 2*E[J,J*] (optimized)
+   - Metric: E[J,J] - 2*E[J,J*] + E[J*,J*] (logged, always >= 0)
+   - Like CFM but matches full flux using operator-valued kernels
+   - RECOMMENDED for flux-based training
 
 3. FMX (Flux Matching): Non-conditional flux matching with pushed particles.
-   - Loss: Flux-MMD² between pushed model particles and reference
+   - Same objective/metric as CFMX but with different particle positions
    - Model particles obtained by integrating from x₀ to time t
-   - More expensive (requires ODE integration) and less stable
+   - More expensive (requires ODE integration during training)
+
+Key insight for FMX/CFMX:
+  We minimize obj = E[J,J] - 2*E[J,J*] (dropping constant E[J*,J*] for efficiency).
+  We log mmd2 = obj + E[J*,J*], which is the full non-negative MMD² metric.
+  Both have the same gradients, so optimization is correct even though obj can be very negative.
 
 Usage:
   python train_flow_matching_2d.py --dataset moons --loss cfmx --fmx_auto_sigma
@@ -36,7 +42,7 @@ from flow_matching.datasets import TOY_DATASETS
 from flow_matching.solver import ModelWrapper
 from flow_matching.utils import set_seed
 
-from flow_matching.fmx import fmx_loss
+from flow_matching.fmx import fmx_objective_and_metric
 
 
 class Swish(Module):
@@ -93,10 +99,10 @@ def main():
     parser.add_argument("--dataset", type=str, choices=TOY_DATASETS.keys(), required=True)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--loss", choices=["cfm", "fmx", "cfmx"], default="cfm")
-    parser.add_argument("--fmx_sigma", type=float, default=1.0)
+    parser.add_argument("--fmx_sigma", type=float, default=1.0, help="Manual sigma (ignored if fmx_auto_sigma=True)")
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
-    parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t (only for non-conditional FMX)
-    parser.add_argument("--cfmx_noise", type=float, default=0.01, help="Noise level for CFMX bridge to avoid degeneracy")
+    parser.add_argument("--fmx_steps", type=int, default=32, help="Euler steps for non-conditional FMX")
+    parser.add_argument("--fmx_ridge", type=float, default=1e-6, help="Ridge regularization for kernel stability")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,7 +116,8 @@ def main():
     print(f"Dataset: {args.dataset}")
 
     # Training parameters
-    learning_rate = 1e-3
+    # Lower LR for (C)FMX since Hessian kernels are sharper
+    learning_rate = 5e-4 if args.loss in ("fmx", "cfmx") else 1e-3
     batch_size = 4096
     iterations = 20000
     log_every = 2000
@@ -136,59 +143,73 @@ def main():
         optimizer.zero_grad()
 
         if args.loss == "cfm":
-            # Original CFM: regress velocity on reference points
+            # -------- Conditional Flow Matching (CFM) --------
+            # Standard velocity regression at conditional bridge points
             v_pred = flow(x_t=x_t, t=t)
             loss = F.mse_loss(v_pred, dx_t)
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.item())
 
         elif args.loss == "cfmx":
             # -------- Conditional Flux Matching (CFMX) --------
-            # Like CFM, we evaluate at the conditional bridge, but add noise to avoid degeneracy.
-            # Reference flux from the linear bridge x_t = (1-t)x₀ + tx₁:
+            # Reference flux from the conditional bridge x_t = (1-t)x₀ + tx₁
             Xr, vr = x_t.detach(), dx_t.detach()
 
-            # Model flux: sample nearby points to avoid Xm = Xr degeneracy
-            # Add small Gaussian noise to create a distribution around the bridge
-            noise = torch.randn_like(x_t) * args.cfmx_noise
-            Xm = x_t + noise
-            vm = flow(x_t=Xm, t=t)  # Model velocity at noisy bridge points
+            # Model flux evaluated at the SAME conditional bridge points (like CFM)
+            Xm = x_t
+            vm = flow(x_t=Xm, t=t)
 
-            # Match fluxes using operator-valued kernel
-            loss = fmx_loss(
+            # Compute objective and metric
+            obj, mmd2 = fmx_objective_and_metric(
                 Xm=Xm.reshape(Xm.size(0), -1),
                 vm=vm.reshape(vm.size(0), -1),
                 Xr=Xr.reshape(Xr.size(0), -1),
                 vr=vr.reshape(vr.size(0), -1),
-                sigma=args.fmx_sigma,
-                auto_sigma=args.fmx_auto_sigma,
+                sigma=(None if args.fmx_auto_sigma else args.fmx_sigma),
+                use_auto_sigma=args.fmx_auto_sigma,
+                ridge=args.fmx_ridge,
             )
+
+            # Optimize the objective
+            obj.backward()
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
+            optimizer.step()
+            # Log the non-negative metric
+            losses.append(mmd2.item())
 
         else:  # args.loss == "fmx"
             # -------- Flux Matching (FMX) - non-conditional --------
-            # Reference flux samples (positions & velocities) from the linear bridge:
+            # Reference flux from the conditional bridge
             Xr, vr = x_t.detach(), dx_t.detach()
 
-            # Model particles at same time t (push base x0 -> time t under current flow)
+            # Model particles: push x₀ through learned flow to time t
             with torch.no_grad():
                 Xm = push_to_time(flow, x_0.detach(), t.detach(), n_steps=args.fmx_steps)
 
-            vm = flow(x_t=Xm, t=t)  # model velocity at model particles
+            vm = flow(x_t=Xm, t=t)
 
-            # FMX operates on [B, d]; flatten (even though here d=2) for generality
-            loss = fmx_loss(
+            # Compute objective and metric
+            obj, mmd2 = fmx_objective_and_metric(
                 Xm=Xm.reshape(Xm.size(0), -1),
                 vm=vm.reshape(vm.size(0), -1),
                 Xr=Xr.reshape(Xr.size(0), -1),
                 vr=vr.reshape(vr.size(0), -1),
-                sigma=args.fmx_sigma,
-                auto_sigma=args.fmx_auto_sigma,
+                sigma=(None if args.fmx_auto_sigma else args.fmx_sigma),
+                use_auto_sigma=args.fmx_auto_sigma,
+                ridge=args.fmx_ridge,
             )
 
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.item())
+            # Optimize the objective
+            obj.backward()
+            torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
+            optimizer.step()
+            # Log the non-negative metric
+            losses.append(mmd2.item())
 
         if (global_step + 1) % log_every == 0:
-            print(f"| step: {global_step+1:6d} | loss: {loss.item():8.4f} |")
+            # Print the last logged loss value
+            print(f"| step: {global_step+1:6d} | loss: {losses[-1]:8.4f} |")
 
     flow.eval()
     torch.save(flow.state_dict(), Path(args.output_dir) / "ckpt.pth")
