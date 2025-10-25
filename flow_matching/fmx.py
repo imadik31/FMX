@@ -38,10 +38,20 @@ def median_heuristic(X: torch.Tensor, Y: torch.Tensor) -> float:
         Y = Y[idx_y]
 
     dif = X[:, None, :] - Y[None, :, :]
-    dist = torch.sqrt((dif**2).sum(dim=-1) + 1e-12)
+    dist2 = (dif**2).sum(dim=-1)
+
+    # Remove diagonal (self-comparisons) if X and Y are similar
+    if X.shape == Y.shape and torch.allclose(X, Y, atol=1e-6):
+        # Mask out diagonal elements
+        mask = ~torch.eye(X.size(0), dtype=torch.bool, device=X.device)
+        dist2 = dist2[mask]
+
+    dist = torch.sqrt(dist2 + 1e-12)
     median_dist = torch.median(dist)
     sigma = median_dist.item() / torch.sqrt(torch.tensor(2.0)).item()
-    return max(sigma, 0.1)  # Avoid too small sigma
+
+    # Ensure sigma is in a reasonable range
+    return max(min(sigma, 10.0), 0.1)
 
 
 def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float):
@@ -106,18 +116,27 @@ def fmx_loss(
     Kmm = rbf_ovk_hessian(Xm, Xm, sigma)   # [B,B,d,d]
     Kmr = rbf_ovk_hessian(Xm, Xr, sigma)   # [B,Br,d,d]
 
+    # Normalize velocities to prevent scale issues
+    vm_scale = vm.abs().mean() + 1e-8
+    vr_scale = vr.abs().mean() + 1e-8
+    vm_norm = vm / vm_scale
+    vr_norm = vr / vr_scale
+
     # (vm^T Kmm vm) using batched broadcasting
-    vm_col = vm[:, None, :, None]          # [B,1,d,1]
-    vm_row = vm[None, :, None, :]          # [1,B,1,d]
+    vm_col = vm_norm[:, None, :, None]          # [B,1,d,1]
+    vm_row = vm_norm[None, :, None, :]          # [1,B,1,d]
     term_mm = (vm_col * Kmm * vm_row).sum(dim=(-1, -2)).mean()
 
-    vr_row = vr[None, :, None, :]          # [1,Br,1,d]
+    vr_row = vr_norm[None, :, None, :]          # [1,Br,1,d]
     term_mr = (vm_col * Kmr * vr_row).sum(dim=(-1, -2)).mean()
 
     # E[J*,J*] is constant wrt θ; drop it.
     loss = term_mm - 2.0 * term_mr
 
-    # Clamp loss to avoid extreme values
-    loss = torch.clamp(loss, min=-1e10, max=1e10)
+    # Scale back by velocity scales for proper gradients
+    loss = loss * vm_scale * vr_scale
+
+    # Soft clamp to avoid extreme values but allow gradients
+    loss = torch.tanh(loss / 100.0) * 100.0
 
     return loss

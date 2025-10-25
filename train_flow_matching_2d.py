@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--fmx_sigma", type=float, default=1.0)
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
     parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t (only for non-conditional FMX)
+    parser.add_argument("--cfmx_noise", type=float, default=0.01, help="Noise level for CFMX bridge to avoid degeneracy")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -141,13 +142,15 @@ def main():
 
         elif args.loss == "cfmx":
             # -------- Conditional Flux Matching (CFMX) --------
-            # Like CFM, we evaluate both reference and model at the conditional bridge points.
+            # Like CFM, we evaluate at the conditional bridge, but add noise to avoid degeneracy.
             # Reference flux from the linear bridge x_t = (1-t)x₀ + tx₁:
             Xr, vr = x_t.detach(), dx_t.detach()
 
-            # Model flux at the SAME conditional bridge points (not pushed through the flow):
-            Xm = x_t  # Evaluate at the same positions as reference
-            vm = flow(x_t=Xm, t=t)  # Model velocity at conditional bridge points
+            # Model flux: sample nearby points to avoid Xm = Xr degeneracy
+            # Add small Gaussian noise to create a distribution around the bridge
+            noise = torch.randn_like(x_t) * args.cfmx_noise
+            Xm = x_t + noise
+            vm = flow(x_t=Xm, t=t)  # Model velocity at noisy bridge points
 
             # Match fluxes using operator-valued kernel
             loss = fmx_loss(
