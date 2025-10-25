@@ -14,6 +14,9 @@ from flow_matching.datasets import TOY_DATASETS
 from flow_matching.solver import ModelWrapper
 from flow_matching.utils import set_seed
 
+# NEW: FMX loss
+from flow_matching.fmx import fmx_loss
+
 
 class Swish(Module):
     def forward(self, x: Tensor) -> Tensor:
@@ -46,15 +49,38 @@ class Mlp(Module):
         return output.reshape(*size)
 
 
+def push_to_time(vnet: Mlp, x0: Tensor, t: Tensor, n_steps: int = 32) -> Tensor:
+    """
+    Simple fixed-step Euler integrator to push base samples x0 from time 0 to time t.
+    x0: [B,d], t: [B,1] or [B]; returns x_t ~ p_{t,theta}.
+    """
+    if t.ndim == 1:
+        t = t[:, None]
+    # Use a scalar dt (same for the batch); you can switch to per-sample stepping if desired.
+    dt = (t.max() - 0.0) / n_steps
+    x = x0
+    tau = 0.0
+    for _ in range(n_steps):
+        tau = tau + dt
+        tau_tensor = torch.ones_like(x[:, :1]) * tau  # [B,1]
+        x = x + dt * vnet(x_t=x, t=tau_tensor)
+    return x
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, choices=TOY_DATASETS.keys(), required=True)
     parser.add_argument("--output-dir", type=str, default="outputs")
+    parser.add_argument("--loss", choices=["cfm", "fmx"], default="cfm")
+    parser.add_argument("--fmx_sigma", type=float, default=1.0)
+    parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(42)
-    args.output_dir = Path(args.output_dir) / "cfm" / args.dataset
+
+    # Save under .../<loss>/<dataset>/ to separate CFM vs FMX runs
+    args.output_dir = Path(args.output_dir) / args.loss / args.dataset
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using device: {device}")
@@ -73,21 +99,43 @@ def main():
     optimizer = torch.optim.AdamW(flow.parameters(), learning_rate)
 
     # Training
-
     losses = []
     for global_step in range(iterations):
-        x_1 = dataset.sample(batch_size)
-        x_0 = torch.randn_like(x_1).to(device)
-        t = torch.rand(x_1.size(0), 1).to(device)
+        x_1 = dataset.sample(batch_size)                  # data samples
+        x_0 = torch.randn_like(x_1).to(device)           # base samples ~ N(0,I)
+        t = torch.rand(x_1.size(0), 1).to(device)        # times ~ U[0,1]
 
-        # Compute the Conditional Flow Matching objective
-        # Check eq. (22) and (23) in the paper: https://arxiv.org/abs/2210.02747
-        # where, we set \sigma_{\min} = 0
-        x_t = (1 - t) * x_0 + t * x_1  # \phi_t(x_0)
-        dx_t = x_1 - x_0  # u_t(x|x_t)
+        # Conditional Flow Matching target (linear bridge as in the paper)
+        # x_t^* = (1 - t) x0 + t x1, and v^* = x1 - x0
+        x_t = (1 - t) * x_0 + t * x_1                    # reference positions at time t
+        dx_t = x_1 - x_0                                 # reference velocities at those positions
 
         optimizer.zero_grad()
-        loss = F.mse_loss(flow(x_t=x_t, t=t), dx_t)
+
+        if args.loss == "cfm":
+            # Original CFM: regress velocity on reference points
+            v_pred = flow(x_t=x_t, t=t)
+            loss = F.mse_loss(v_pred, dx_t)
+        else:
+            # -------- Flux Matching (FMX) --------
+            # Reference flux samples (positions & velocities) from the linear bridge:
+            Xr, vr = x_t.detach(), dx_t.detach()
+
+            # Model particles at same time t (push base x0 -> time t under current flow)
+            with torch.no_grad():
+                Xm = push_to_time(flow, x_0.detach(), t.detach(), n_steps=args.fmx_steps)
+
+            vm = flow(x_t=Xm, t=t)  # model velocity at model particles
+
+            # FMX operates on [B, d]; flatten (even though here d=2) for generality
+            loss = fmx_loss(
+                Xm=Xm.reshape(Xm.size(0), -1),
+                vm=vm.reshape(vm.size(0), -1),
+                Xr=Xr.reshape(Xr.size(0), -1),
+                vr=vr.reshape(vr.size(0), -1),
+                sigma=args.fmx_sigma,
+            )
+
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
