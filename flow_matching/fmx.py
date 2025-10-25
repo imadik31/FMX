@@ -9,6 +9,33 @@ between the model and reference distributions.
 import torch
 
 
+def median_heuristic(X: torch.Tensor, Y: torch.Tensor) -> float:
+    """
+    Compute median heuristic for RBF kernel bandwidth.
+
+    Args:
+        X: Tensor of shape [B, d]
+        Y: Tensor of shape [B', d]
+
+    Returns:
+        sigma: Recommended bandwidth parameter
+    """
+    # Subsample for efficiency if needed
+    max_samples = 1000
+    if X.size(0) > max_samples:
+        idx_x = torch.randperm(X.size(0))[:max_samples]
+        X = X[idx_x]
+    if Y.size(0) > max_samples:
+        idx_y = torch.randperm(Y.size(0))[:max_samples]
+        Y = Y[idx_y]
+
+    dif = X[:, None, :] - Y[None, :, :]
+    dist = torch.sqrt((dif**2).sum(dim=-1) + 1e-12)
+    median_dist = torch.median(dist)
+    sigma = median_dist.item() / torch.sqrt(torch.tensor(2.0)).item()
+    return max(sigma, 0.1)  # Avoid too small sigma
+
+
 def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float):
     """
     Operator-valued kernel K = ∇_x ∇_{x'}^T k_RBF(x, x'), with
@@ -23,13 +50,19 @@ def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float):
         Kxy: Tensor of shape [B, B', d, d] - the operator-valued kernel matrix
     """
     B, d = X.shape
+    sigma2 = sigma ** 2
+    sigma4 = sigma ** 4
+
     dif = X[:, None, :] - Y[None, :, :]                    # [B,B',d]
     dist2 = (dif**2).sum(dim=-1)                           # [B,B']
-    kxy = torch.exp(-0.5 * dist2 / (sigma**2 + 1e-12))     # [B,B']
 
-    outer = dif[..., :, None] * dif[..., None, :] / (sigma**4 + 1e-12)  # [B,B',d,d]
-    I = torch.eye(d, device=X.device).view(1, 1, d, d)
-    Kxy = (outer - I / (sigma**2 + 1e-12)) * kxy[..., None, None]
+    # Clamp distances to avoid numerical issues
+    dist2 = torch.clamp(dist2, max=50.0 * sigma2)
+    kxy = torch.exp(-0.5 * dist2 / sigma2)                 # [B,B']
+
+    outer = dif[..., :, None] * dif[..., None, :] / sigma4  # [B,B',d,d]
+    I = torch.eye(d, device=X.device, dtype=X.dtype).view(1, 1, d, d)
+    Kxy = (outer - I / sigma2) * kxy[..., None, None]
     return Kxy  # [B,B',d,d]
 
 
@@ -39,6 +72,7 @@ def fmx_loss(
     Xr: torch.Tensor,
     vr: torch.Tensor,
     sigma: float = 1.0,
+    auto_sigma: bool = False,
 ) -> torch.Tensor:
     """
     Flux-MMD^2 with operator-valued kernel:
@@ -50,11 +84,17 @@ def fmx_loss(
         vm: Model velocities, shape [B, d]
         Xr: Reference particles, shape [Br, d]
         vr: Reference velocities, shape [Br, d]
-        sigma: RBF kernel width
+        sigma: RBF kernel width (ignored if auto_sigma=True)
+        auto_sigma: If True, compute sigma using median heuristic
 
     Returns:
         Scalar tensor loss
     """
+    # Auto-compute sigma if requested
+    if auto_sigma:
+        with torch.no_grad():
+            sigma = median_heuristic(Xm, Xr)
+
     Kmm = rbf_ovk_hessian(Xm, Xm, sigma)   # [B,B,d,d]
     Kmr = rbf_ovk_hessian(Xm, Xr, sigma)   # [B,Br,d,d]
 
@@ -67,4 +107,9 @@ def fmx_loss(
     term_mr = (vm_col * Kmr * vr_row).sum(dim=(-1, -2)).mean()
 
     # E[J*,J*] is constant wrt θ; drop it.
-    return term_mm - 2.0 * term_mr
+    loss = term_mm - 2.0 * term_mr
+
+    # Clamp loss to avoid extreme values
+    loss = torch.clamp(loss, min=-1e10, max=1e10)
+
+    return loss

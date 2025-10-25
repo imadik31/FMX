@@ -73,6 +73,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--loss", choices=["cfm", "fmx"], default="cfm")
     parser.add_argument("--fmx_sigma", type=float, default=1.0)
+    parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
     parser.add_argument("--fmx_steps", type=int, default=32)  # Euler steps to push model to time t
     args = parser.parse_args()
 
@@ -134,6 +135,7 @@ def main():
                 Xr=Xr.reshape(Xr.size(0), -1),
                 vr=vr.reshape(vr.size(0), -1),
                 sigma=args.fmx_sigma,
+                auto_sigma=args.fmx_auto_sigma,
             )
 
         loss.backward()
