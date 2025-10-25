@@ -1,8 +1,7 @@
 # adapted from https://github.com/facebookresearch/flow_matching
 
 from abc import ABC
-from collections.abc import Callable
-from typing import Optional, Sequence, Tuple, Union
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor, nn
