@@ -5,10 +5,17 @@ This module implements the Flux-MMD^2 loss with operator-valued kernel,
 which matches the flux (joint distribution of positions and velocities)
 between the model and reference distributions.
 
-Key insight:
-- We minimize: obj = E[J,J] - 2*E[J,J*]  (constant E[J*,J*] dropped for efficiency)
-- We monitor: mmd2 = E[J,J] - 2*E[J,J*] + E[J*,J*]  (full non-negative MMD^2)
-- Both share the same gradients, but obj can be very negative while mmd2 is always >= 0
+Key theoretical points:
+
+1. Curl-free vector RKHS:
+   - Uses K_cf(x,x') = -∇_x ∇_{x'}^T k(x,x')  (NEGATIVE Hessian)
+   - The negative sign is crucial for PSD (Micchelli & Pontil)
+   - Ensures mmd2 >= 0 by construction
+
+2. Optimization vs monitoring:
+   - We minimize: obj = E[J,J] - 2*E[J,J*]  (constant E[J*,J*] dropped for efficiency)
+   - We monitor: mmd2 = E[J,J] - 2*E[J,J*] + E[J*,J*]  (full non-negative MMD^2)
+   - Both share the same gradients, but obj can be very negative while mmd2 is always >= 0
 """
 
 import torch
@@ -42,9 +49,12 @@ def median_heuristic_sigma(Xa: torch.Tensor, Xb: torch.Tensor, floor: float = 1e
 
 def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float, ridge: float = 0.0):
     """
-    Operator-valued kernel: K = ∇_x ∇_{x'}^T k_RBF(x, x'), k = exp(-||x-x'||^2 / (2 σ^2)).
-    Returns Kxy: [B, B', d, d].
-    Includes an optional tiny 'ridge' on the diagonal blocks for stability.
+    Curl-free operator-valued kernel: K_cf = -∇_x ∇_{x'}^T k_RBF(x, x').
+
+    For curl-free vector RKHS, the PSD kernel is the *negative* Hessian.
+    k(x,x') = exp(-||x-x'||^2 / (2 σ^2))
+
+    Returns Kxy: [B, B', d, d] - the curl-free OVK (negative Hessian).
 
     Args:
         X: Tensor of shape [B, d]
@@ -53,7 +63,7 @@ def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float, ridge: float
         ridge: Ridge regularization added to diagonal blocks (if X == Y)
 
     Returns:
-        Kxy: Tensor of shape [B, B', d, d]
+        Kxy: Tensor of shape [B, B', d, d] - PSD curl-free kernel
     """
     B, d = X.shape
     dif = X[:, None, :] - Y[None, :, :]                    # [B,B',d]
@@ -61,9 +71,15 @@ def rbf_ovk_hessian(X: torch.Tensor, Y: torch.Tensor, sigma: float, ridge: float
     inv_sigma2 = 1.0 / (sigma**2 + 1e-12)
     inv_sigma4 = inv_sigma2 * inv_sigma2
     kxy = torch.exp(-0.5 * dist2 * inv_sigma2)             # [B,B']
+
+    # Hessian of RBF: H = ((x-x')(x-x')^T / σ^4 - I/σ^2) * k
     outer = dif[..., :, None] * dif[..., None, :] * inv_sigma4  # [B,B',d,d]
     I = torch.eye(d, device=X.device).view(1, 1, d, d)
-    Kxy = (outer - I * inv_sigma2) * kxy[..., None, None]  # [B,B',d,d]
+    H = (outer - I * inv_sigma2) * kxy[..., None, None]  # [B,B',d,d]
+
+    # ✅ Curl-free OVK is the *negative* Hessian: K_cf = -H
+    # This ensures the kernel is PSD and mmd2 is non-negative
+    Kxy = -H
 
     if ridge > 0.0 and X.data_ptr() == Y.data_ptr():
         # add small ridge only on (i,i) blocks
