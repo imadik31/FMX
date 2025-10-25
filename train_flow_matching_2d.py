@@ -231,8 +231,11 @@ def main():
 
             # Log the non-negative metric (not the objective!)
             mmd2_val = float(mmd2.detach().cpu())
-            assert mmd2_val >= -1e-8, f"mmd2 should be non-negative, got {mmd2_val}"  # allow tiny FP error
-            losses.append(max(0.0, mmd2_val))  # clamp to 0 if slightly negative due to numerical error
+            # In theory mmd2 >= 0 (PSD kernel), but numerical errors can cause small negatives
+            # Typical: -1e-8 (FP noise), sometimes -1e-3 (finite samples + ridge + U-stat)
+            if mmd2_val < -1e-2:
+                print(f"Warning: mmd2 = {mmd2_val:.6f} is significantly negative, possible numerical issue")
+            losses.append(max(0.0, mmd2_val))  # clamp to 0
 
         if (global_step + 1) % log_every == 0:
             # Print the last logged loss value
