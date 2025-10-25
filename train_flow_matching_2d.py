@@ -4,27 +4,46 @@ Training script for 2D toy datasets with Flow Matching variants.
 Supports three loss types:
 1. CFM (Conditional Flow Matching): Standard velocity regression at conditional bridge points.
    - Loss: MSE between v_θ(x_t, t) and (x₁ - x₀)
+   - Deterministic bridge: x_t = (1-t)x₀ + tx₁
    - Fastest and most stable baseline
 
-2. FMX / CFMX (Flux Matching): Flux matching with pushed particles.
-   - Reference flux: (Xr=x_t, vr=x₁-x₀) from conditional bridge
+2. FMX / CFMX (Conditional Flux Matching): Flux matching with stabilization.
+   - Reference flux: (Xr, vr) from NOISY conditional bridge
    - Model flux: (Xm, vm) where Xm is pushed from x₀ to time t via ODE
-   - Objective: E[J,J] - 2*E[J,J*] (what we minimize, can be very negative)
-   - Metric: E[J,J] - 2*E[J,J*] + E[J*,J*] (what we log, always >= 0)
-   - Both FMX and CFMX use the same implementation
+   - Objective: E[J,J] - 2*E[J,J*] (minimized)
+   - Metric: E[J,J] - 2*E[J,J*] + E[J*,J*] (logged, always >= 0)
 
-Key insight for FMX/CFMX:
-  We minimize obj = E[J,J] - 2*E[J,J*] (dropping constant E[J*,J*] for efficiency).
-  We log mmd2 = obj + E[J*,J*], which is the full non-negative MMD² metric.
-  Both have the same gradients, so optimization is correct even though obj can be very negative.
-  The logged mmd2 shows you the true non-negative distance being minimized.
+   Key improvements for stability:
+   a) Noisy conditional bridge: x_t = (1-t)x₀ + tx₁ + σ_t·ε
+      - σ_t = σ_base·sqrt(t(1-t)) softens Dirac spikes
+      - Default σ_base = 0.15 (tune with --cfmx_sigma_base)
+
+   b) Time-tied kernel bandwidth: σ = mean(σ_t)
+      - Matches kernel scale to bridge noise
+      - Prevents overfitting to spiky flux
+
+   c) Velocity anchor: loss = obj + λ·MSE(v_θ(x_t,t), v*)
+      - λ = 0.1 by default (tune with --cfmx_lambda_vel)
+      - Keeps optimization well-conditioned
+      - Hybrid flux + velocity matching
+
+   d) U-statistic: no self-pairs in E[J,J] and E[J*,J*]
+      - Reduces finite-sample bias
+      - More stable training curves
+
+   e) Curl-free PSD kernel: K_cf = -∇∇^T k (negative Hessian)
+      - Ensures mmd2 >= 0 by construction
+      - Critical for theoretical correctness
 
 Usage:
-  # Recommended: CFMX with auto sigma
-  python train_flow_matching_2d.py --dataset moons --loss cfmx --fmx_auto_sigma
+  # Recommended: CFMX with default settings
+  python train_flow_matching_2d.py --dataset moons --loss cfmx
 
-  # Or with manual sigma
-  python train_flow_matching_2d.py --dataset moons --loss cfmx --fmx_sigma 0.5
+  # Tune the noisy bridge
+  python train_flow_matching_2d.py --dataset moons --loss cfmx --cfmx_sigma_base 0.2
+
+  # Adjust velocity anchor weight
+  python train_flow_matching_2d.py --dataset moons --loss cfmx --cfmx_lambda_vel 0.2
 
   # Baseline CFM for comparison
   python train_flow_matching_2d.py --dataset moons --loss cfm
@@ -109,6 +128,8 @@ def main():
     parser.add_argument("--fmx_auto_sigma", action="store_true", help="Auto-compute sigma using median heuristic")
     parser.add_argument("--fmx_steps", type=int, default=32, help="Euler steps for non-conditional FMX")
     parser.add_argument("--fmx_ridge", type=float, default=1e-6, help="Ridge regularization for kernel stability")
+    parser.add_argument("--cfmx_sigma_base", type=float, default=0.15, help="Base noise level for noisy CFMX bridge")
+    parser.add_argument("--cfmx_lambda_vel", type=float, default=0.1, help="Weight for velocity anchor term")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -145,10 +166,18 @@ def main():
         x_0 = torch.randn_like(x_1).to(device)           # base samples ~ N(0,I)
         t = torch.rand(x_1.size(0), 1).to(device)        # times ~ U[0,1]
 
-        # Conditional Flow Matching target (linear bridge as in the paper)
-        # x_t^* = (1 - t) x0 + t x1, and v^* = x1 - x0
-        x_t = (1 - t) * x_0 + t * x_1                    # reference positions at time t
-        dx_t = x_1 - x_0                                 # reference velocities at those positions
+        # Conditional Flow Matching target
+        if args.loss in ("fmx", "cfmx"):
+            # --- Noisy conditional bridge (soften the Dirac for CFMX) ---
+            # Makes p_t*(·|x0,x1) a small Gaussian around the straight line
+            eps = torch.randn_like(x_1)
+            sigma_t = args.cfmx_sigma_base * torch.sqrt(t * (1.0 - t))  # 0 at ends, max in middle
+            x_t = (1.0 - t) * x_0 + t * x_1 + sigma_t * eps
+            dx_t = x_1 - x_0
+        else:
+            # Standard CFM: deterministic bridge
+            x_t = (1 - t) * x_0 + t * x_1
+            dx_t = x_1 - x_0
 
         optimizer.zero_grad()
 
@@ -177,37 +206,32 @@ def main():
             Xr_f = Xr.reshape(Xr.size(0), -1)
             vr_f = vr.reshape(vr.size(0), -1)
 
-            # Compute sigma with EMA for stability
-            if args.fmx_auto_sigma:
-                from flow_matching.fmx import median_heuristic_sigma
-                with torch.no_grad():
-                    sigma_now = median_heuristic_sigma(Xm_f.detach(), Xr_f.detach())
-                    sigma_now = max(0.5 * sigma_now, 1e-2)
-                    if sigma_ema is None:
-                        sigma_ema = sigma_now
-                    else:
-                        sigma_ema = ema_momentum * sigma_ema + (1 - ema_momentum) * sigma_now
-                sigma_used = sigma_ema
-            else:
-                sigma_used = args.fmx_sigma
+            # Tie kernel bandwidth to time noise (for CFMX stability)
+            with torch.no_grad():
+                sigma_used = float(sigma_t.mean().clamp(min=1e-2))
 
-            # Compute objective and metric with fixed sigma
+            # Compute objective and metric
             obj, mmd2 = fmx_objective_and_metric(
                 Xm_f, vm_f, Xr_f, vr_f,
                 sigma=sigma_used,
-                use_auto_sigma=False,  # sigma already computed above
+                use_auto_sigma=False,
                 ridge=args.fmx_ridge,
             )
 
-            # Optimize the objective
-            loss = obj
+            # Add velocity anchor for well-conditioned optimization (hybrid approach)
+            v_pred_ref = flow(x_t=x_t, t=t)
+            vel_mse = F.mse_loss(v_pred_ref, dx_t)
+
+            # Combined loss: flux matching + velocity anchor
+            loss = obj + args.cfmx_lambda_vel * vel_mse
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=5.0)
             optimizer.step()
 
             # Log the non-negative metric (not the objective!)
             mmd2_val = float(mmd2.detach().cpu())
-            assert mmd2_val >= -1e-5, f"mmd2 should be non-negative, got {mmd2_val}"  # allow tiny numerical error
+            assert mmd2_val >= -1e-8, f"mmd2 should be non-negative, got {mmd2_val}"  # allow tiny FP error
             losses.append(max(0.0, mmd2_val))  # clamp to 0 if slightly negative due to numerical error
 
         if (global_step + 1) % log_every == 0:

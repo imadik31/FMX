@@ -105,6 +105,35 @@ def _quad_form(vm: torch.Tensor, K: torch.Tensor, vw: torch.Tensor) -> torch.Ten
     return (vm_col * K * vw_row).sum(dim=(-1, -2)).mean()
 
 
+def _quad_form_U(vm: torch.Tensor, K: torch.Tensor, vw: torch.Tensor) -> torch.Tensor:
+    """
+    U-statistic version: mean_{i != j} v_i^T K_ij w_j
+
+    Masks out diagonal (self-pairs) when K is square to reduce finite-sample bias.
+
+    Args:
+        vm: [B, d]
+        K: [B, B', d, d]
+        vw: [B', d]
+
+    Returns:
+        scalar tensor
+    """
+    B, d = vm.shape
+    Bp = vw.shape[0]
+
+    vm_col = vm[:, None, :, None]     # [B,1,d,1]
+    vw_row = vw[None, :, None, :]     # [1,B',1,d]
+    Q = (vm_col * K * vw_row).sum(dim=(-1, -2))  # [B,B']
+
+    if B == Bp and K.shape[0] == K.shape[1]:
+        # Mask out diagonal when K is square
+        mask = ~torch.eye(B, dtype=torch.bool, device=K.device)
+        return Q[mask].mean()
+    else:
+        return Q.mean()
+
+
 def fmx_objective_and_metric(
     Xm: torch.Tensor,
     vm: torch.Tensor,
@@ -147,9 +176,10 @@ def fmx_objective_and_metric(
     Kmr = rbf_ovk_hessian(Xm, Xr, sigma=sigma_val, ridge=0.0)     # [B,Br,d,d]
     Krr = rbf_ovk_hessian(Xr, Xr, sigma=sigma_val, ridge=ridge)   # [Br,Br,d,d]
 
-    term_mm = _quad_form(vm, Kmm, vm)     # E[J,J]
-    term_mr = _quad_form(vm, Kmr, vr)     # E[J,J*]
-    term_rr = _quad_form(vr, Krr, vr)     # E[J*,J*]  (const wrt θ)
+    # Use U-statistic (no self-pairs) for Kmm and Krr to reduce finite-sample bias
+    term_mm = _quad_form_U(vm, Kmm, vm)     # E[J,J]
+    term_mr = _quad_form_U(vm, Kmr, vr)     # E[J,J*]
+    term_rr = _quad_form_U(vr, Krr, vr)     # E[J*,J*]  (const wrt θ)
 
     obj  = term_mm - 2.0 * term_mr        # what we minimize (same grads as before)
     mmd2 = obj + term_rr                   # non-negative metric to log
