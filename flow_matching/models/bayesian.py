@@ -174,14 +174,19 @@ class BayesianMLP(nn.Module):
 
         Args:
             x_t: State at time t [batch_size, dim]
-            t: Time [batch_size, time_dim]
+            t: Time [batch_size, time_dim] or [batch_size] or scalar
 
         Returns:
             Hidden features [batch_size, hidden_dim]
         """
-        # Concatenate x_t and t
-        if t.dim() == 1:
+        # Handle different time tensor shapes
+        if t.dim() == 0:
+            # Scalar time: expand to match batch size
+            t = t.unsqueeze(0).unsqueeze(0).expand(x_t.size(0), 1)
+        elif t.dim() == 1:
+            # 1D time: add feature dimension
             t = t.unsqueeze(-1)
+
         h = torch.cat([x_t, t], dim=-1)
         return self.backbone(h)
 
