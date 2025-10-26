@@ -77,6 +77,54 @@ Now, you should be able to see the generated samples in the `outputs/cfm/mnist/`
 <img align="middle" src="./outputs/cfm/mnist/trajectory.gif" height="400" />
 </p>
 
+## Bayesian Flow Matching (NEW!)
+
+This repository now includes **Bayesian Flow Matching (BFM)**, which extends standard Flow Matching with **uncertainty quantification** through last-layer variational inference.
+
+### Features
+
+- **Epistemic uncertainty estimation** through posterior sampling
+- **Two approaches**: Full variational training or post-hoc Laplace approximation
+- **Minimal overhead**: ~10-20% slower training with full uncertainty quantification
+- **Better calibration** on out-of-distribution data
+
+### Quick Start
+
+Train a Bayesian Flow Matching model:
+
+```bash
+python train_bayesian_flow_matching_2d.py --dataset checkerboard --beta 1e-4
+```
+
+Analyze uncertainty:
+
+```bash
+python sample_with_uncertainty.py \
+    --dataset checkerboard \
+    --checkpoint outputs/bfm/checkerboard/ckpt.pth \
+    --n-posterior 20
+```
+
+For a complete workflow example:
+
+```bash
+bash examples/run_bayesian_flow_matching.sh
+```
+
+### Laplace Approximation (Alternative)
+
+Convert any trained CFM model to Bayesian without retraining:
+
+```bash
+python laplace_approximation.py \
+    --dataset checkerboard \
+    --checkpoint outputs/cfm/checkerboard/ckpt.pth
+```
+
+### Documentation
+
+For detailed documentation, hyperparameter tuning guide, and theoretical background, see [BAYESIAN_FLOW_MATCHING.md](BAYESIAN_FLOW_MATCHING.md).
+
 ## Rectified Flow [Liu+ 2023]
 
 This is an implementation of the Reflow model (2-Rectified Flow to be specific) from the Rectified Flow paper [2].
