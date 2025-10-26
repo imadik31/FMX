@@ -226,9 +226,8 @@ def analyze_trajectory_uncertainty(
             return_intermediates=True,
         )
 
-        # traj is list of tensors, stack them
-        traj_tensor = torch.stack(traj, dim=0)  # [n_steps, n_traj, dim]
-        all_trajectories.append(traj_tensor)
+        # traj is already a tensor [n_steps, n_traj, dim]
+        all_trajectories.append(traj)
 
     # Stack: [K, n_steps, n_traj, dim]
     all_trajectories = torch.stack(all_trajectories, dim=0)
