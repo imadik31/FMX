@@ -171,6 +171,53 @@ python sample_with_uncertainty.py \
 3. **Samples with epistemic uncertainty ellipses** (2σ)
 4. **Trajectory uncertainty over time**
 
+### 4. Uncertainty Evaluation (`evaluate_uncertainty.py`)
+
+Quantitatively validate that uncertainty is meaningful and well-calibrated:
+
+```bash
+python evaluate_uncertainty.py \
+    --dataset checkerboard \
+    --checkpoint outputs/bfm/checkerboard/ckpt.pth \
+    --n-posterior 50 \
+    --n-samples 8192
+```
+
+**Key Arguments:**
+- `--n-posterior`: Number of posterior samples for uncertainty estimation
+- `--n-samples`: Number of test samples for correlation analysis
+- `--n-calibration-samples`: Samples for coverage calibration (default: 2048)
+- `--n-calibration-posterior`: Posterior samples for calibration (default: 100)
+
+**Metrics Computed:**
+
+1. **Uncertainty-Error Correlation (Spearman ρ)**
+   - Measures if high uncertainty correlates with high prediction error
+   - **Good**: ρ > 0.3 (uncertainty is informative)
+   - **Moderate**: ρ > 0.1 (some informativeness)
+   - **Poor**: ρ < 0.1 (uncertainty not well-calibrated)
+
+2. **Coverage Calibration**
+   - Tests if α-credible intervals contain true values ≈α% of the time
+   - Evaluates at multiple time points (t=0.25, 0.5, 0.75)
+   - Well-calibrated if observed ≈ expected (±5%)
+
+3. **Posterior Statistics**
+   - Mean, std, min, max of learned weight/bias variances
+   - Helps tune β and σ_p hyperparameters
+
+**Outputs:**
+- `uncertainty_error_scatter.png`: Visual correlation analysis
+- `uncertainty_metrics.json`: Numerical metrics (ρ, p-value, coverage)
+- Console output with detailed statistics
+
+**Why This Matters:**
+
+This proves BFM provides **meaningful uncertainty**—not just random noise. A well-calibrated model:
+- Knows what it doesn't know (high uncertainty → high error)
+- Provides reliable confidence intervals (coverage ≈ expected)
+- Can be trusted for active learning, out-of-distribution detection, etc.
+
 ## Example Workflow
 
 ### Full Pipeline (Recommended)
@@ -183,16 +230,37 @@ python train_bayesian_flow_matching_2d.py \
     --iterations 20000 \
     --hidden-dim 512
 
-# 2. Analyze uncertainty
+# 2. Visualize uncertainty in samples and trajectories
 python sample_with_uncertainty.py \
     --dataset checkerboard \
     --checkpoint outputs/bfm/checkerboard/ckpt.pth \
     --n-posterior 20 \
     --n-samples 1000
 
-# 3. Compare with standard CFM
+# 3. Evaluate uncertainty quality (NEW!)
+python evaluate_uncertainty.py \
+    --dataset checkerboard \
+    --checkpoint outputs/bfm/checkerboard/ckpt.pth \
+    --n-posterior 50
+
+# 4. Compare with standard CFM
 python train_flow_matching_2d.py --dataset checkerboard
 ```
+
+**What each script does:**
+
+1. **`train_bayesian_flow_matching_2d.py`**: Train BFM model with ELBO objective
+   - Outputs: Model checkpoint, training curves (loss, MSE, KL, β)
+
+2. **`sample_with_uncertainty.py`**: Visual analysis of uncertainty
+   - Outputs: Uncertainty ellipses on samples, trajectory uncertainty plots
+   - Shows *where* the model is uncertain
+
+3. **`evaluate_uncertainty.py`**: Quantitative validation of uncertainty quality
+   - Outputs: Uncertainty-error correlation (Spearman ρ), coverage calibration
+   - Proves the uncertainty is *meaningful* and well-calibrated
+
+4. **`train_flow_matching_2d.py`**: Baseline deterministic CFM for comparison
 
 ### Quick Start (Laplace Approximation)
 
