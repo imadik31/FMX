@@ -134,12 +134,19 @@ def main():
         kl_losses.append(kl.item())
 
         if (global_step + 1) % 2000 == 0:
+            # Log posterior statistics
+            with torch.no_grad():
+                mean_std_W = torch.exp(flow.head.W_logsig).mean().item()
+                mean_std_b = torch.exp(flow.head.b_logsig).mean().item()
+
             print(
                 f"| step: {global_step+1:6d} | "
                 f"loss: {loss.item():8.4f} | "
                 f"mse: {mse.item():8.4f} | "
                 f"kl: {kl.item():8.2f} | "
-                f"beta: {beta_t:.6f} |"
+                f"beta: {beta_t:.6f} | "
+                f"W_std: {mean_std_W:.4f} | "
+                f"b_std: {mean_std_b:.4f} |"
             )
 
     flow.eval()
