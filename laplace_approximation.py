@@ -19,6 +19,7 @@ Disadvantages:
 
 import argparse
 from pathlib import Path
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -166,7 +167,7 @@ class LaplaceLastLayer:
         print(f"  Max W variance: {self.W_var.max().item():.6f}")
         print(f"  Max b variance: {self.b_var.max().item():.6f}")
 
-    def sample_weights(self) -> tuple[Tensor, Tensor]:
+    def sample_weights(self) -> Tuple[Tensor, Tensor]:
         """
         Sample from posterior q(W, b).
 

@@ -9,6 +9,7 @@ This script demonstrates:
 
 import argparse
 from pathlib import Path
+from typing import Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,7 +45,7 @@ def sample_with_uncertainty(
     n_posterior_samples: int = 10,
     step_size: float = 0.01,
     method: str = "euler",
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor]:
     """
     Sample from flow with uncertainty quantification.
 
