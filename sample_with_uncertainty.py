@@ -337,18 +337,58 @@ def main():
     # Load dataset
     dataset = TOY_DATASETS[args.dataset](device=device)
 
-    # Create model
-    model = BayesianMLP(
-        dim=dataset.dim,
-        time_dim=1,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        sigma_p=args.sigma_prior,
-    ).to(device)
-
     # Load checkpoint
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint)
+
+    # Check if checkpoint contains config (new format) or just state_dict (old format)
+    if isinstance(checkpoint, dict) and 'config' in checkpoint:
+        # New format with config
+        config = checkpoint['config']
+        state_dict = checkpoint['state_dict']
+        print(f"Loaded config from checkpoint:")
+        print(f"  dim={config['dim']}, hidden_dim={config['hidden_dim']}, "
+              f"num_layers={config['num_layers']}, sigma_p={config['sigma_p']}")
+    else:
+        # Old format (just state_dict) - infer architecture from state_dict keys
+        state_dict = checkpoint
+
+        # Infer num_layers from backbone structure
+        # Backbone has structure: [Linear, SiLU] * num_layers
+        backbone_keys = [k for k in state_dict.keys() if k.startswith('backbone.') and 'weight' in k]
+        if backbone_keys:
+            max_idx = max([int(k.split('.')[1]) for k in backbone_keys])
+            inferred_num_layers = (max_idx + 1) // 2
+        else:
+            inferred_num_layers = args.num_layers
+
+        # Infer hidden_dim from first backbone layer
+        if 'backbone.0.weight' in state_dict:
+            inferred_hidden_dim = state_dict['backbone.0.weight'].shape[0]
+        else:
+            inferred_hidden_dim = args.hidden_dim
+
+        config = {
+            'dim': dataset.dim,
+            'time_dim': 1,
+            'hidden_dim': inferred_hidden_dim,
+            'num_layers': inferred_num_layers,
+            'sigma_p': args.sigma_prior,
+        }
+
+        print(f"Warning: Old checkpoint format detected. Inferred architecture from state_dict:")
+        print(f"  dim={config['dim']}, hidden_dim={config['hidden_dim']}, "
+              f"num_layers={config['num_layers']}, sigma_p={config['sigma_p']}")
+
+    # Create model with loaded/inferred config
+    model = BayesianMLP(
+        dim=config['dim'],
+        time_dim=config['time_dim'],
+        hidden_dim=config['hidden_dim'],
+        num_layers=config['num_layers'],
+        sigma_p=config['sigma_p'],
+    ).to(device)
+
+    model.load_state_dict(state_dict)
     model.eval()
     print(f"Loaded model from {args.checkpoint}")
 

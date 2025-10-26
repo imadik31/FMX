@@ -143,7 +143,19 @@ def main():
             )
 
     flow.eval()
-    torch.save(flow.state_dict(), Path(args.output_dir) / "ckpt.pth")
+
+    # Save model with configuration
+    checkpoint = {
+        'state_dict': flow.state_dict(),
+        'config': {
+            'dim': dataset.dim,
+            'time_dim': 1,
+            'hidden_dim': args.hidden_dim,
+            'num_layers': args.num_layers,
+            'sigma_p': args.sigma_prior,
+        }
+    }
+    torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")
     print(f"\nModel saved to {Path(args.output_dir) / 'ckpt.pth'}")
 
     # Plot learning curves
