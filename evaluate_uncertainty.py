@@ -13,6 +13,7 @@ These metrics demonstrate the value of BFM over deterministic CFM.
 
 import argparse
 from pathlib import Path
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -89,7 +90,12 @@ def joint_coverage_from_samples(
     return coverage
 
 
-def marginal_coverage_from_samples(V: Tensor, v_gt: Tensor, alphas: list) -> dict:
+def marginal_coverage_from_samples(
+    V: Tensor,
+    v_gt: Tensor,
+    alphas: list,
+    add_likelihood_sigma: Optional[float] = None
+) -> dict:
     """
     Compute marginal (per-dimension) coverage using quantile intervals.
 
@@ -100,10 +106,19 @@ def marginal_coverage_from_samples(V: Tensor, v_gt: Tensor, alphas: list) -> dic
         V: Posterior samples [K, B, d]
         v_gt: Ground truth velocities [B, d]
         alphas: List of credible levels
+        add_likelihood_sigma: If provided, inflate variance by sigma_like^2 for predictive coverage
 
     Returns:
         dict mapping alpha -> observed marginal coverage
     """
+    K, B, d = V.shape
+
+    # If adding likelihood noise for predictive coverage
+    if add_likelihood_sigma is not None:
+        # For marginal coverage with Gaussian likelihood, we sample noise for each posterior sample
+        # V_pred = V_epistemic + N(0, sigma_like^2)
+        V = V + add_likelihood_sigma * torch.randn_like(V)
+
     coverage = {}
 
     for alpha in alphas:
@@ -249,6 +264,12 @@ def compute_coverage_calibration(
 
     model.eval()
 
+    # Extract learned likelihood sigma for PREDICTIVE coverage
+    # (epistemic + aleatoric uncertainty)
+    with torch.no_grad():
+        sigma_likelihood = torch.exp(model.log_sigma_likelihood).item()
+    print(f"Using learned σ_likelihood = {sigma_likelihood:.4f} for predictive coverage")
+
     # Sample test data
     print(f"\nSampling {n_samples} test points for calibration...")
     x_1 = dataset.sample(n_samples)
@@ -279,12 +300,13 @@ def compute_coverage_calibration(
         v_gt = v_gt.cpu()
 
         # Compute JOINT multivariate coverage (correct for d>1)
-        cover_joint = joint_coverage_from_samples(V, v_gt, alphas, add_likelihood_sigma=None)
+        # Using PREDICTIVE coverage: Σ_pred = Σ_epistemic + σ_like² I
+        cover_joint = joint_coverage_from_samples(V, v_gt, alphas, add_likelihood_sigma=sigma_likelihood)
         for alpha in alphas:
             all_coverages_joint[alpha].append(cover_joint[alpha])
 
         # Compute MARGINAL per-dimension coverage (for comparison)
-        cover_marginal = marginal_coverage_from_samples(V, v_gt, alphas)
+        cover_marginal = marginal_coverage_from_samples(V, v_gt, alphas, add_likelihood_sigma=sigma_likelihood)
         for alpha in alphas:
             all_coverages_marginal[alpha].append(cover_marginal[alpha])
 
@@ -296,6 +318,7 @@ def compute_coverage_calibration(
     print("Coverage Calibration - JOINT (Multivariate Ellipsoid)")
     print("=" * 80)
     print("This is the CORRECT test for vector-valued predictions.")
+    print(f"Testing PREDICTIVE coverage: Σ_pred = Σ_epistemic + σ_like² I")
     print(f"{'Alpha':>6} | {'Expected':>8} | {'Observed':>8} | {'Diff':>7}")
     print("-" * 80)
 
