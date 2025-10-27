@@ -223,3 +223,75 @@ else:
 4. **Check calibration** after training with evaluate_uncertainty.py
 
 The goal is **positive ρ > 0.2** and **coverage within ±10%** of expected.
+
+## Understanding Coverage: Epistemic vs Predictive
+
+### Critical Distinction
+
+When evaluating coverage, you must distinguish between:
+
+1. **Epistemic uncertainty**: From weight posterior (Σ_epistemic)
+   - Quantifies "model uncertainty" - what the model doesn't know
+   - Comes from sampling W, b from posterior distribution
+   - Can be reduced by seeing more data or using larger models
+
+2. **Predictive uncertainty**: Epistemic + Aleatoric (Σ_pred = Σ_epistemic + σ_like² I)
+   - Quantifies "total uncertainty" - model + inherent noise
+   - Adds assumed data noise σ_like to account for label variability
+   - Cannot be reduced below aleatoric noise level
+
+### For Flow Matching: Use Epistemic Coverage (σ_like = 0)
+
+**Key insight**: Flow matching with deterministic velocity fields has **NO aleatoric noise**.
+
+Given (x₀, x₁, t), the velocity v = x₁ - x₀ is **deterministic** - there's no label noise!
+
+Therefore:
+- The learned `log_sigma_likelihood` parameter is a **training mechanism** (ELBO regularization)
+- It is NOT the true aleatoric noise level
+- For coverage testing, use **σ_like = 0** (epistemic-only)
+
+### Evaluation Commands
+
+**Epistemic-only coverage** (recommended for flow matching):
+```bash
+python evaluate_uncertainty.py \
+    --dataset checkerboard \
+    --checkpoint outputs/bfm/checkerboard/ckpt.pth \
+    --sigma-like 0
+```
+
+**Predictive coverage** (if you genuinely have label noise):
+```bash
+python evaluate_uncertainty.py \
+    --dataset checkerboard \
+    --checkpoint outputs/bfm/checkerboard/ckpt.pth \
+    --sigma-like 0.3  # Use the value you passed to --sigma-likelihood during training
+```
+
+### What Went Wrong Before
+
+In the previous fix, we auto-extracted σ_like from the **learned** `log_sigma_likelihood` parameter.
+This caused massive **over-coverage** (0.95 → 0.98-0.99) because:
+
+1. Learned σ_like ≈ 2.8 (very large!)
+2. This bloated predictive ellipsoids: Σ_pred = Σ_epistemic + 2.8² I
+3. But 2.8 is NOT genuine data noise - it's a training artifact
+
+**Now**: Evaluation uses the **fixed** `--sigma-likelihood` training hyperparameter (or 0 by default).
+
+### Joint vs Marginal Coverage
+
+Both epistemic and predictive coverage can be tested using:
+
+1. **Joint multivariate coverage** (CORRECT for d>1):
+   - Uses Mahalanobis distance: d²(x) = (x-μ)ᵀ Σ⁻¹ (x-μ)
+   - Tests if truth lies in ellipsoid with covariance Σ
+   - Properly accounts for correlations between dimensions
+
+2. **Marginal per-dimension coverage** (for comparison):
+   - Uses quantile intervals per dimension
+   - Ignores correlations
+   - Will under-report coverage for correlated dimensions
+
+**Always use joint coverage** for vector-valued predictions!
