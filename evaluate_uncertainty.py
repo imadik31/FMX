@@ -8,6 +8,13 @@ is meaningful and well-calibrated:
 2. Coverage calibration: Do credible intervals contain the true values at the expected rate?
 3. Posterior statistics: What are the learned posterior variances?
 
+Important distinction:
+- EPISTEMIC uncertainty: from weight posterior (Σ_epistemic)
+- PREDICTIVE uncertainty: epistemic + aleatoric (Σ_pred = Σ_epistemic + σ_like² I)
+
+For flow matching with deterministic velocity fields, use σ_like=0 (epistemic-only).
+For regression with label noise, use σ_like > 0 (predictive coverage).
+
 These metrics demonstrate the value of BFM over deterministic CFM.
 """
 
@@ -238,6 +245,7 @@ def compute_coverage_calibration(
     n_samples: int = 2048,
     n_posterior: int = 100,
     alphas: list = None,
+    sigma_likelihood: float = 0.0,
     device: torch.device = None,
 ) -> dict:
     """
@@ -252,6 +260,8 @@ def compute_coverage_calibration(
         n_samples: Number of test samples
         n_posterior: Number of posterior samples
         alphas: List of credible interval levels (e.g., [0.5, 0.8, 0.95])
+        sigma_likelihood: Aleatoric noise std for predictive coverage.
+                         Use 0.0 for epistemic-only coverage (deterministic velocity fields)
 
     Returns:
         dict with coverage statistics
@@ -263,12 +273,6 @@ def compute_coverage_calibration(
         alphas = [0.5, 0.68, 0.8, 0.9, 0.95]
 
     model.eval()
-
-    # Extract learned likelihood sigma for PREDICTIVE coverage
-    # (epistemic + aleatoric uncertainty)
-    with torch.no_grad():
-        sigma_likelihood = torch.exp(model.log_sigma_likelihood).item()
-    print(f"Using learned σ_likelihood = {sigma_likelihood:.4f} for predictive coverage")
 
     # Sample test data
     print(f"\nSampling {n_samples} test points for calibration...")
@@ -318,7 +322,10 @@ def compute_coverage_calibration(
     print("Coverage Calibration - JOINT (Multivariate Ellipsoid)")
     print("=" * 80)
     print("This is the CORRECT test for vector-valued predictions.")
-    print(f"Testing PREDICTIVE coverage: Σ_pred = Σ_epistemic + σ_like² I")
+    if sigma_likelihood > 0:
+        print(f"Testing PREDICTIVE coverage: Σ_pred = Σ_epistemic + σ_like² I (σ_like={sigma_likelihood:.4f})")
+    else:
+        print("Testing EPISTEMIC coverage: Σ_pred = Σ_epistemic (appropriate for deterministic fields)")
     print(f"{'Alpha':>6} | {'Expected':>8} | {'Observed':>8} | {'Diff':>7}")
     print("-" * 80)
 
@@ -453,6 +460,10 @@ def main():
     parser.add_argument("--n-posterior", type=int, default=50)
     parser.add_argument("--n-calibration-samples", type=int, default=2048)
     parser.add_argument("--n-calibration-posterior", type=int, default=100)
+    parser.add_argument("--sigma-like", type=float, default=None,
+                        help="Override sigma_likelihood for predictive coverage. "
+                             "If None, use checkpoint config 'sigma_likelihood' if present; else 0.0 "
+                             "(0.0 = epistemic-only coverage for deterministic velocity fields)")
 
     args = parser.parse_args()
 
@@ -533,11 +544,23 @@ def main():
     print(f"\n" + "=" * 80)
     print("Computing coverage calibration...")
     print("=" * 80)
+
+    # Determine sigma_likelihood for predictive coverage
+    # Use CLI override if provided, else checkpoint config, else 0.0 (epistemic-only)
+    sigma_like_for_coverage = args.sigma_like
+    if sigma_like_for_coverage is None:
+        sigma_like_for_coverage = config.get('sigma_likelihood', 0.0)
+
+    print(f"Using σ_likelihood = {sigma_like_for_coverage:.4f} for predictive coverage")
+    if sigma_like_for_coverage == 0.0:
+        print("  (0.0 = epistemic-only coverage, appropriate for deterministic velocity fields)")
+
     calibration_results = compute_coverage_calibration(
         model,
         dataset,
         n_samples=args.n_calibration_samples,
         n_posterior=args.n_calibration_posterior,
+        sigma_likelihood=sigma_like_for_coverage,
         device=device
     )
 

@@ -161,7 +161,8 @@ def main():
             with torch.no_grad():
                 mean_std_W = torch.exp(flow.head.W_logsig).mean().item()
                 mean_std_b = torch.exp(flow.head.b_logsig).mean().item()
-                sigma_like = torch.exp(flow.log_sigma_likelihood).item()
+                # Note: log_sigma_likelihood is a learnable ELBO parameter, not true aleatoric noise
+                sigma_like_learned = torch.exp(flow.log_sigma_likelihood).item()
 
             print(
                 f"| step: {global_step+1:6d} | "
@@ -171,7 +172,7 @@ def main():
                 f"beta: {beta_t:.6f} | "
                 f"W_std: {mean_std_W:.4f} | "
                 f"b_std: {mean_std_b:.4f} | "
-                f"σ_like: {sigma_like:.4f} |"
+                f"σ_like(learned): {sigma_like_learned:.4f} |"
             )
 
     flow.eval()
@@ -185,7 +186,8 @@ def main():
             'hidden_dim': args.hidden_dim,
             'num_layers': args.num_layers,
             'sigma_p': args.sigma_prior,
-            'init_sigma_likelihood': args.sigma_likelihood,
+            'init_sigma_likelihood': args.sigma_likelihood,  # For model initialization
+            'sigma_likelihood': args.sigma_likelihood,  # Fixed training hyperparameter for coverage evaluation
         }
     }
     torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")
