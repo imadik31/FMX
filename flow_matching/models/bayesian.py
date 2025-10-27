@@ -168,6 +168,9 @@ class BayesianMLP(nn.Module):
             init_log_sigma=init_log_sigma,
         )
 
+        # Number of parameters in Bayesian head (for KL normalization)
+        self.num_head_params = self.head.W_mu.numel() + self.head.b_mu.numel()
+
     def encode(self, x_t: Tensor, t: Tensor) -> Tensor:
         """
         Encode (x_t, t) through deterministic backbone.

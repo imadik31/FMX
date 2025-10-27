@@ -83,6 +83,10 @@ def main():
         init_log_sigma=-2.0,
     ).to(device)
 
+    print(f"\nModel architecture:")
+    print(f"  Bayesian head parameters: {flow.num_head_params}")
+    print(f"  (KL will be normalized by this count)")
+
     optimizer = torch.optim.AdamW(flow.parameters(), args.learning_rate)
 
     # Training metrics
@@ -117,11 +121,12 @@ def main():
         v_pred_mc = flow.forward_sample(x_t, t, n_mc=args.n_mc_train)  # [n_mc, B, d]
 
         # Compute ELBO loss
-        # L = 1/(2*sigma_l^2) * E_q[||v - v*||^2] + beta * KL(q||p)
+        # L = MSE/(2*sigma_l^2) + beta * KL(q||p) / num_params
         mse = ((v_pred_mc - dx_t).pow(2)).mean()
-        kl = flow.kl_divergence()
+        kl_raw = flow.kl_divergence()
+        kl = kl_raw / flow.num_head_params  # Normalize by number of parameters
 
-        likelihood_term = (1.0 / (2 * args.sigma_likelihood ** 2)) * mse
+        likelihood_term = mse / (2 * args.sigma_likelihood ** 2)
         loss = likelihood_term + beta_t * kl
 
         loss.backward()
@@ -131,7 +136,7 @@ def main():
         # Log metrics
         losses.append(loss.item())
         mse_losses.append(mse.item())
-        kl_losses.append(kl.item())
+        kl_losses.append(kl.item())  # Store normalized KL
 
         if (global_step + 1) % 2000 == 0:
             # Log posterior statistics
@@ -143,7 +148,7 @@ def main():
                 f"| step: {global_step+1:6d} | "
                 f"loss: {loss.item():8.4f} | "
                 f"mse: {mse.item():8.4f} | "
-                f"kl: {kl.item():8.2f} | "
+                f"kl/p: {kl.item():7.4f} | "  # KL per parameter
                 f"beta: {beta_t:.6f} | "
                 f"W_std: {mean_std_W:.4f} | "
                 f"b_std: {mean_std_b:.4f} |"
@@ -191,14 +196,14 @@ def main():
     ax.set_ylabel("MSE", fontsize=12)
     ax.grid(True, alpha=0.3)
 
-    # KL divergence
+    # KL divergence (normalized per parameter)
     ax = axes[1, 0]
     smoothed = gaussian_filter1d(kl_losses, sigma=5)
     ax.plot(steps, kl_losses, alpha=0.3, color="#2ca02c")
     ax.plot(steps, smoothed, linewidth=2, color="#2ca02c")
-    ax.set_title("KL Divergence", fontsize=14)
+    ax.set_title("KL Divergence (per parameter)", fontsize=14)
     ax.set_xlabel("Steps", fontsize=12)
-    ax.set_ylabel("KL(q||p)", fontsize=12)
+    ax.set_ylabel("KL(q||p) / #params", fontsize=12)
     ax.grid(True, alpha=0.3)
 
     # Beta schedule
