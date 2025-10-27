@@ -37,15 +37,13 @@ def main():
 
     # Bayesian-specific hyperparameters
     parser.add_argument("--beta", type=float, default=1e-4,
-                        help="KL weight (1e-5 to 1e-3 recommended)")
-    parser.add_argument("--sigma-likelihood", type=float, default=1.0,
-                        help="Residual std for likelihood")
+                        help="KL weight (higher = stronger prior regularization)")
     parser.add_argument("--sigma-prior", type=float, default=1.0,
                         help="Prior std for Bayesian head")
     parser.add_argument("--dropout-p", type=float, default=0.1,
                         help="MC dropout probability for input-dependent uncertainty (0.1-0.2 recommended)")
-    parser.add_argument("--n-mc-train", type=int, default=1,
-                        help="Number of MC samples during training")
+    parser.add_argument("--n-mc-train", type=int, default=5,
+                        help="Number of MC samples during training (5-10 recommended for lower variance gradients)")
     parser.add_argument("--beta-warmup-steps", type=int, default=2000,
                         help="Number of steps to warmup KL weight from 0 to beta")
 
@@ -69,7 +67,7 @@ def main():
     print(f"Batch size: {args.batch_size}, Iterations: {args.iterations}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Beta (KL weight): {args.beta}, Warmup steps: {args.beta_warmup_steps}")
-    print(f"Sigma likelihood: {args.sigma_likelihood}, Sigma prior: {args.sigma_prior}")
+    print(f"Sigma prior: {args.sigma_prior}")
     print(f"MC dropout p: {args.dropout_p} (for input-dependent uncertainty)")
     print(f"MC samples (train): {args.n_mc_train}, MC samples (eval): {args.n_mc_sample}")
     print("=" * 80)
@@ -83,25 +81,24 @@ def main():
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         sigma_p=args.sigma_prior,
-        # init_log_sigma uses new default of -0.5 (std ≈ 0.61)
-        init_sigma_likelihood=args.sigma_likelihood,
+        # init_log_sigma uses default of -0.5 (std ≈ 0.61)
         dropout_p=args.dropout_p,
     ).to(device)
 
     print(f"\nModel architecture:")
-    print(f"  Bayesian head parameters: {flow.num_head_params}")
-    print(f"  (KL will be normalized by this count)")
+    num_bayesian_params = flow.head.W_mu.numel() + flow.head.b_mu.numel()
+    print(f"  Bayesian head parameters: {num_bayesian_params}")
 
     # Use separate parameter groups to prevent weight decay on variance parameters
     # Weight decay on variance parameters pushes std → 0 (posterior collapse)
     # Explicit grouping:
-    #   no_decay: all variance params (W_logsig, b_logsig), likelihood scale, conventional biases
+    #   no_decay: all variance params (W_logsig, b_logsig) + conventional biases
     #   decay: all mean parameters (W_mu, b_mu) and backbone weights
     no_decay = []
     decay = []
     for name, param in flow.named_parameters():
-        # Exclude from weight decay: variance parameters + likelihood scale + biases
-        if any(k in name for k in ['W_logsig', 'b_logsig', 'log_sigma_likelihood']) or name.endswith('bias'):
+        # Exclude from weight decay: variance parameters + biases
+        if any(k in name for k in ['W_logsig', 'b_logsig']) or name.endswith('bias'):
             no_decay.append(param)
         else:
             # Apply weight decay to: mean parameters + backbone weights
@@ -146,56 +143,42 @@ def main():
         # Forward pass with MC sampling
         v_pred_mc = flow.forward_sample(x_t, t, n_mc=args.n_mc_train)  # [n_mc, B, d]
 
-        # Compute ELBO loss
-        # L = MSE/(2*sigma_l^2) + log(sigma_l) + beta * KL(q||p) / num_params
-        # Using learnable log_sigma_likelihood prevents posterior collapse
+        # Compute loss: MSE + beta * KL
+        # For deterministic flow matching (v = x_1 - x_0), there is no observation noise
+        # The velocity field is deterministic given the data
         mse = ((v_pred_mc - dx_t).pow(2)).mean()
-        kl_raw = flow.kl_divergence()
-        kl = kl_raw / flow.num_head_params  # Normalize by number of parameters
+        kl = flow.kl_divergence()
 
-        # Negative log-likelihood with learnable noise scale
-        # NLL = 0.5 * MSE/σ² + log(σ)  (up to constant)
-        sigma2 = torch.exp(2.0 * flow.log_sigma_likelihood)
-        nll = 0.5 * mse / sigma2 + flow.log_sigma_likelihood  # Fixed: was 0.5 * log_sigma
-
-        loss = nll + beta_t * kl
+        # Simple loss: MSE reconstruction + KL regularization
+        # No artificial "likelihood noise" - the velocity is deterministic
+        loss = mse + beta_t * kl
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(flow.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(flow.parameters(), 5.0)  # Increased from 1.0
         optimizer.step()
 
         # Log metrics
         losses.append(loss.item())
         mse_losses.append(mse.item())
-        kl_losses.append(kl.item())  # Store normalized KL
+        kl_losses.append(kl.item())
 
         if (global_step + 1) % 2000 == 0:
             # Log posterior statistics
             with torch.no_grad():
                 mean_std_W = torch.exp(flow.head.W_logsig).mean().item()
                 mean_std_b = torch.exp(flow.head.b_logsig).mean().item()
-                # Note: log_sigma_likelihood is a learnable ELBO parameter, not true aleatoric noise
-                sigma_like_learned = torch.exp(flow.log_sigma_likelihood).item()
 
             print(
                 f"| step: {global_step+1:6d} | "
                 f"loss: {loss.item():8.4f} | "
                 f"mse: {mse.item():8.4f} | "
-                f"kl/p: {kl.item():7.4f} | "  # KL per parameter
+                f"kl: {kl.item():7.4f} | "
                 f"beta: {beta_t:.6f} | "
                 f"W_std: {mean_std_W:.4f} | "
-                f"b_std: {mean_std_b:.4f} | "
-                f"σ_like(learned): {sigma_like_learned:.4f} |"
+                f"b_std: {mean_std_b:.4f} |"
             )
 
     flow.eval()
-
-    # Extract learned sigma_likelihood for checkpoint
-    # (evaluator will use this for predictive coverage by default)
-    with torch.no_grad():
-        sigma_like_learned = float(torch.exp(flow.log_sigma_likelihood))
-
-    print(f"\nFinal learned σ_likelihood: {sigma_like_learned:.4f}")
 
     # Save model with configuration
     checkpoint = {
@@ -206,13 +189,11 @@ def main():
             'hidden_dim': args.hidden_dim,
             'num_layers': args.num_layers,
             'sigma_p': args.sigma_prior,
-            'init_sigma_likelihood': args.sigma_likelihood,  # Initial value for model initialization
-            'sigma_likelihood': sigma_like_learned,  # LEARNED value for predictive coverage evaluation
-            'dropout_p': args.dropout_p,  # MC dropout probability
+            'dropout_p': args.dropout_p,
         }
     }
     torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")
-    print(f"Model saved to {Path(args.output_dir) / 'ckpt.pth'}")
+    print(f"\nModel saved to {Path(args.output_dir) / 'ckpt.pth'}")
 
     # Plot learning curves
     print("\nPlotting learning curves...")

@@ -133,7 +133,6 @@ class BayesianMLP(nn.Module):
         num_layers: Number of hidden layers (default: 3)
         sigma_p: Prior std for Bayesian head (default: 1.0)
         init_log_sigma: Initial log std for posterior (default: -0.5, i.e., std ≈ 0.61)
-        init_sigma_likelihood: Initial likelihood noise scale (default: 1.0, learnable)
         dropout_p: MC dropout probability (default: 0.1, for input-dependent uncertainty)
     """
 
@@ -144,9 +143,8 @@ class BayesianMLP(nn.Module):
         hidden_dim: int = 512,
         num_layers: int = 3,
         sigma_p: float = 1.0,
-        init_log_sigma: float = -0.5,  # Changed from -2.0 to -0.5
-        init_sigma_likelihood: float = 1.0,  # Initial likelihood noise scale
-        dropout_p: float = 0.1,  # MC dropout probability for input-dependent uncertainty
+        init_log_sigma: float = -0.5,
+        dropout_p: float = 0.1,
     ) -> None:
         super().__init__()
 
@@ -182,14 +180,6 @@ class BayesianMLP(nn.Module):
             sigma_p=sigma_p,
             init_log_sigma=init_log_sigma,
         )
-
-        # Learnable likelihood noise scale (prevents posterior collapse from fixed sigma_like)
-        self.log_sigma_likelihood = nn.Parameter(
-            torch.tensor(math.log(init_sigma_likelihood))
-        )
-
-        # Number of parameters in Bayesian head (for KL normalization)
-        self.num_head_params = self.head.W_mu.numel() + self.head.b_mu.numel()
 
     def encode(self, x_t: Tensor, t: Tensor) -> Tensor:
         """

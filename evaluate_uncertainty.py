@@ -458,9 +458,9 @@ def main():
     parser.add_argument("--n-calibration-samples", type=int, default=2048)
     parser.add_argument("--n-calibration-posterior", type=int, default=100)
     parser.add_argument("--sigma-like", type=float, default=None,
-                        help="Override sigma_likelihood for predictive coverage. "
-                             "If None, use checkpoint config 'sigma_likelihood' if present; else 0.0 "
-                             "(0.0 = epistemic-only coverage for deterministic velocity fields)")
+                        help="Aleatoric noise std for predictive coverage testing. "
+                             "Default: 0.0 (epistemic-only, appropriate for deterministic flow matching). "
+                             "Set >0 only for diagnostic testing with artificial noise.")
 
     args = parser.parse_args()
 
@@ -504,7 +504,6 @@ def main():
         }
 
     # Add defaults for backward compatibility
-    config.setdefault('init_sigma_likelihood', 1.0)
     config.setdefault('dropout_p', 0.1)
 
     # Create model
@@ -514,7 +513,6 @@ def main():
         hidden_dim=config['hidden_dim'],
         num_layers=config['num_layers'],
         sigma_p=config['sigma_p'],
-        init_sigma_likelihood=config['init_sigma_likelihood'],
         dropout_p=config['dropout_p'],
     ).to(device)
 
@@ -544,14 +542,15 @@ def main():
     print("=" * 80)
 
     # Determine sigma_likelihood for predictive coverage
-    # Use CLI override if provided, else checkpoint config, else 0.0 (epistemic-only)
-    sigma_like_for_coverage = args.sigma_like
-    if sigma_like_for_coverage is None:
-        sigma_like_for_coverage = config.get('sigma_likelihood', 0.0)
+    # For deterministic flow matching (v = x_1 - x_0), there is no observation noise
+    # Default to 0.0 (epistemic-only), or use CLI override for diagnostic testing
+    sigma_like_for_coverage = args.sigma_like if args.sigma_like is not None else 0.0
 
     print(f"Using σ_likelihood = {sigma_like_for_coverage:.4f} for predictive coverage")
     if sigma_like_for_coverage == 0.0:
-        print("  (0.0 = epistemic-only coverage, appropriate for deterministic velocity fields)")
+        print("  (Epistemic-only: appropriate for deterministic velocity fields)")
+    else:
+        print(f"  (Predictive: Σ = Σ_epistemic + {sigma_like_for_coverage:.4f}² I, for diagnostic testing)")
 
     calibration_results = compute_coverage_calibration(
         model,
