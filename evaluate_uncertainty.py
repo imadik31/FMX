@@ -506,8 +506,9 @@ def main():
             'sigma_p': 1.0,
         }
 
-    # Add default for init_sigma_likelihood (backward compatibility)
+    # Add defaults for backward compatibility
     config.setdefault('init_sigma_likelihood', 1.0)
+    config.setdefault('dropout_p', 0.1)
 
     # Create model
     model = BayesianMLP(
@@ -517,6 +518,7 @@ def main():
         num_layers=config['num_layers'],
         sigma_p=config['sigma_p'],
         init_sigma_likelihood=config['init_sigma_likelihood'],
+        dropout_p=config['dropout_p'],
     ).to(device)
 
     model.load_state_dict(state_dict)

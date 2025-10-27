@@ -118,10 +118,12 @@ class BayesianHead(nn.Module):
 
 class BayesianMLP(nn.Module):
     """
-    Bayesian Flow Matching MLP with last-layer variational inference.
+    Bayesian Flow Matching MLP with last-layer variational inference + MC Dropout.
 
     Architecture:
     - Deterministic backbone (multiple hidden layers)
+    - LayerNorm (stabilizes feature scale)
+    - MC Dropout (input-dependent uncertainty, active during sampling)
     - Bayesian last layer (variational)
 
     Args:
@@ -132,6 +134,7 @@ class BayesianMLP(nn.Module):
         sigma_p: Prior std for Bayesian head (default: 1.0)
         init_log_sigma: Initial log std for posterior (default: -0.5, i.e., std ≈ 0.61)
         init_sigma_likelihood: Initial likelihood noise scale (default: 1.0, learnable)
+        dropout_p: MC dropout probability (default: 0.1, for input-dependent uncertainty)
     """
 
     def __init__(
@@ -143,6 +146,7 @@ class BayesianMLP(nn.Module):
         sigma_p: float = 1.0,
         init_log_sigma: float = -0.5,  # Changed from -2.0 to -0.5
         init_sigma_likelihood: float = 1.0,  # Initial likelihood noise scale
+        dropout_p: float = 0.1,  # MC dropout probability for input-dependent uncertainty
     ) -> None:
         super().__init__()
 
@@ -166,6 +170,11 @@ class BayesianMLP(nn.Module):
         # Prevents uncertainty from tracking ||features||
         self.feat_norm = nn.LayerNorm(hidden_dim, elementwise_affine=True)
 
+        # MC Dropout for input-dependent epistemic uncertainty
+        # Applied before Bayesian head, active during posterior sampling
+        self.dropout_last = nn.Dropout(p=dropout_p)
+        self.use_mc_dropout = False  # Flag to enable dropout during eval/sampling
+
         # Bayesian last layer
         self.head = BayesianHead(
             in_features=hidden_dim,
@@ -184,7 +193,7 @@ class BayesianMLP(nn.Module):
 
     def encode(self, x_t: Tensor, t: Tensor) -> Tensor:
         """
-        Encode (x_t, t) through deterministic backbone.
+        Encode (x_t, t) through deterministic backbone + dropout.
 
         Args:
             x_t: State at time t [batch_size, dim]
@@ -205,11 +214,20 @@ class BayesianMLP(nn.Module):
         feats = self.backbone(h)
         # Apply LayerNorm to stabilize feature scale before Bayesian head
         feats = self.feat_norm(feats)
+
+        # Apply MC dropout if training or use_mc_dropout flag is set
+        # This makes epistemic uncertainty input-dependent
+        if self.training or self.use_mc_dropout:
+            feats = self.dropout_last(feats)
+
         return feats
 
     def forward_sample(self, x_t: Tensor, t: Tensor, n_mc: int = 1) -> Tensor:
         """
-        Forward pass with Monte Carlo sampling from posterior.
+        Forward pass with Monte Carlo sampling from posterior + MC dropout.
+
+        During sampling, both weight posterior and MC dropout are sampled,
+        providing input-dependent epistemic uncertainty.
 
         Args:
             x_t: State at time t [batch_size, dim]
@@ -219,11 +237,23 @@ class BayesianMLP(nn.Module):
         Returns:
             Velocity predictions [n_mc, batch_size, dim]
         """
-        feats = self.encode(x_t, t)
+        # Enable MC dropout during sampling (even in eval mode)
+        was_training = self.training
+        self.eval()
+        self.use_mc_dropout = True
 
-        # Sample n_mc times from posterior
-        samples = torch.stack([self.head.sample_forward(feats) for _ in range(n_mc)], dim=0)
-        return samples
+        # Collect n_mc samples with different dropout masks + weight samples
+        samples = []
+        for _ in range(n_mc):
+            feats = self.encode(x_t, t)
+            samples.append(self.head.sample_forward(feats))
+
+        # Restore original state
+        self.use_mc_dropout = False
+        if was_training:
+            self.train()
+
+        return torch.stack(samples, dim=0)
 
     def forward_mean(self, x_t: Tensor, t: Tensor) -> Tensor:
         """

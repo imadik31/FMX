@@ -42,6 +42,8 @@ def main():
                         help="Residual std for likelihood")
     parser.add_argument("--sigma-prior", type=float, default=1.0,
                         help="Prior std for Bayesian head")
+    parser.add_argument("--dropout-p", type=float, default=0.1,
+                        help="MC dropout probability for input-dependent uncertainty (0.1-0.2 recommended)")
     parser.add_argument("--n-mc-train", type=int, default=1,
                         help="Number of MC samples during training")
     parser.add_argument("--beta-warmup-steps", type=int, default=2000,
@@ -68,6 +70,7 @@ def main():
     print(f"Learning rate: {args.learning_rate}")
     print(f"Beta (KL weight): {args.beta}, Warmup steps: {args.beta_warmup_steps}")
     print(f"Sigma likelihood: {args.sigma_likelihood}, Sigma prior: {args.sigma_prior}")
+    print(f"MC dropout p: {args.dropout_p} (for input-dependent uncertainty)")
     print(f"MC samples (train): {args.n_mc_train}, MC samples (eval): {args.n_mc_sample}")
     print("=" * 80)
 
@@ -82,6 +85,7 @@ def main():
         sigma_p=args.sigma_prior,
         # init_log_sigma uses new default of -0.5 (std ≈ 0.61)
         init_sigma_likelihood=args.sigma_likelihood,
+        dropout_p=args.dropout_p,
     ).to(device)
 
     print(f"\nModel architecture:")
@@ -188,6 +192,7 @@ def main():
             'sigma_p': args.sigma_prior,
             'init_sigma_likelihood': args.sigma_likelihood,  # For model initialization
             'sigma_likelihood': args.sigma_likelihood,  # Fixed training hyperparameter for coverage evaluation
+            'dropout_p': args.dropout_p,  # MC dropout probability
         }
     }
     torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")
