@@ -378,6 +378,9 @@ def main():
         print(f"  dim={config['dim']}, hidden_dim={config['hidden_dim']}, "
               f"num_layers={config['num_layers']}, sigma_p={config['sigma_p']}")
 
+    # Add default for init_sigma_likelihood (backward compatibility)
+    config.setdefault('init_sigma_likelihood', 1.0)
+
     # Create model with loaded/inferred config
     model = BayesianMLP(
         dim=config['dim'],
@@ -385,6 +388,7 @@ def main():
         hidden_dim=config['hidden_dim'],
         num_layers=config['num_layers'],
         sigma_p=config['sigma_p'],
+        init_sigma_likelihood=config['init_sigma_likelihood'],
     ).to(device)
 
     model.load_state_dict(state_dict)

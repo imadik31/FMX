@@ -130,7 +130,8 @@ class BayesianMLP(nn.Module):
         hidden_dim: Hidden layer size (default: 512)
         num_layers: Number of hidden layers (default: 3)
         sigma_p: Prior std for Bayesian head (default: 1.0)
-        init_log_sigma: Initial log std for posterior (default: -2.0)
+        init_log_sigma: Initial log std for posterior (default: -0.5, i.e., std ≈ 0.61)
+        init_sigma_likelihood: Initial likelihood noise scale (default: 1.0, learnable)
     """
 
     def __init__(
@@ -140,7 +141,8 @@ class BayesianMLP(nn.Module):
         hidden_dim: int = 512,
         num_layers: int = 3,
         sigma_p: float = 1.0,
-        init_log_sigma: float = -2.0,
+        init_log_sigma: float = -0.5,  # Changed from -2.0 to -0.5
+        init_sigma_likelihood: float = 1.0,  # Initial likelihood noise scale
     ) -> None:
         super().__init__()
 
@@ -160,12 +162,21 @@ class BayesianMLP(nn.Module):
 
         self.backbone = nn.Sequential(*layers)
 
+        # Feature normalization before Bayesian head
+        # Prevents uncertainty from tracking ||features||
+        self.feat_norm = nn.LayerNorm(hidden_dim, elementwise_affine=True)
+
         # Bayesian last layer
         self.head = BayesianHead(
             in_features=hidden_dim,
             out_features=dim,
             sigma_p=sigma_p,
             init_log_sigma=init_log_sigma,
+        )
+
+        # Learnable likelihood noise scale (prevents posterior collapse from fixed sigma_like)
+        self.log_sigma_likelihood = nn.Parameter(
+            torch.tensor(math.log(init_sigma_likelihood))
         )
 
         # Number of parameters in Bayesian head (for KL normalization)
@@ -191,7 +202,10 @@ class BayesianMLP(nn.Module):
             t = t.unsqueeze(-1)
 
         h = torch.cat([x_t, t], dim=-1)
-        return self.backbone(h)
+        feats = self.backbone(h)
+        # Apply LayerNorm to stabilize feature scale before Bayesian head
+        feats = self.feat_norm(feats)
+        return feats
 
     def forward_sample(self, x_t: Tensor, t: Tensor, n_mc: int = 1) -> Tensor:
         """

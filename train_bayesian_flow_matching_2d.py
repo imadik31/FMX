@@ -80,14 +80,28 @@ def main():
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         sigma_p=args.sigma_prior,
-        init_log_sigma=-2.0,
+        # init_log_sigma uses new default of -0.5 (std ≈ 0.61)
+        init_sigma_likelihood=args.sigma_likelihood,
     ).to(device)
 
     print(f"\nModel architecture:")
     print(f"  Bayesian head parameters: {flow.num_head_params}")
     print(f"  (KL will be normalized by this count)")
 
-    optimizer = torch.optim.AdamW(flow.parameters(), args.learning_rate)
+    # Use separate parameter groups to prevent weight decay on variance parameters
+    # Weight decay on variance parameters pushes std → 0 (posterior collapse)
+    no_decay = []
+    decay = []
+    for name, param in flow.named_parameters():
+        if 'logsig' in name or 'bias' in name or 'log_sigma_like' in name:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+
+    optimizer = torch.optim.AdamW([
+        {'params': decay, 'weight_decay': 1e-4},
+        {'params': no_decay, 'weight_decay': 0.0}
+    ], lr=args.learning_rate)
 
     # Training metrics
     losses = []
@@ -121,13 +135,17 @@ def main():
         v_pred_mc = flow.forward_sample(x_t, t, n_mc=args.n_mc_train)  # [n_mc, B, d]
 
         # Compute ELBO loss
-        # L = MSE/(2*sigma_l^2) + beta * KL(q||p) / num_params
+        # L = MSE/(2*sigma_l^2) + 0.5*log(sigma_l^2) + beta * KL(q||p) / num_params
+        # Using learnable log_sigma_likelihood prevents posterior collapse
         mse = ((v_pred_mc - dx_t).pow(2)).mean()
         kl_raw = flow.kl_divergence()
         kl = kl_raw / flow.num_head_params  # Normalize by number of parameters
 
-        likelihood_term = mse / (2 * args.sigma_likelihood ** 2)
-        loss = likelihood_term + beta_t * kl
+        # Negative log-likelihood with learnable noise scale
+        sigma2 = torch.exp(2.0 * flow.log_sigma_likelihood)
+        nll = 0.5 * mse / sigma2 + 0.5 * flow.log_sigma_likelihood
+
+        loss = nll + beta_t * kl
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(flow.parameters(), 1.0)
@@ -143,6 +161,7 @@ def main():
             with torch.no_grad():
                 mean_std_W = torch.exp(flow.head.W_logsig).mean().item()
                 mean_std_b = torch.exp(flow.head.b_logsig).mean().item()
+                sigma_like = torch.exp(flow.log_sigma_likelihood).item()
 
             print(
                 f"| step: {global_step+1:6d} | "
@@ -151,7 +170,8 @@ def main():
                 f"kl/p: {kl.item():7.4f} | "  # KL per parameter
                 f"beta: {beta_t:.6f} | "
                 f"W_std: {mean_std_W:.4f} | "
-                f"b_std: {mean_std_b:.4f} |"
+                f"b_std: {mean_std_b:.4f} | "
+                f"σ_like: {sigma_like:.4f} |"
             )
 
     flow.eval()
@@ -165,6 +185,7 @@ def main():
             'hidden_dim': args.hidden_dim,
             'num_layers': args.num_layers,
             'sigma_p': args.sigma_prior,
+            'init_sigma_likelihood': args.sigma_likelihood,
         }
     }
     torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")

@@ -40,6 +40,9 @@ def test_posterior_sampling():
             'sigma_p': 1.0,
         }
 
+    # Add default for init_sigma_likelihood (backward compatibility)
+    config.setdefault('init_sigma_likelihood', 1.0)
+
     # Create model
     model = BayesianMLP(
         dim=config['dim'],
@@ -47,6 +50,7 @@ def test_posterior_sampling():
         hidden_dim=config['hidden_dim'],
         num_layers=config['num_layers'],
         sigma_p=config['sigma_p'],
+        init_sigma_likelihood=config['init_sigma_likelihood'],
     ).to(device)
 
     model.load_state_dict(state_dict)
