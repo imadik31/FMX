@@ -73,15 +73,16 @@ def joint_coverage_from_samples(
         eye = torch.eye(d, device=Sigma.device).unsqueeze(0)  # [1, d, d]
         Sigma = Sigma + (add_likelihood_sigma ** 2) * eye
 
-    # Regularize and invert covariances
-    eps = 1e-6
+    # Regularize and invert covariances using pseudoinverse for robustness
+    # (handles small K or near-singular covariances better than inv)
+    eps = 1e-5 if K < 50 else 1e-6
     eye = torch.eye(d, device=Sigma.device).unsqueeze(0)
-    Sigma_inv = torch.linalg.inv(Sigma + eps * eye)  # [B, d, d]
+    Sigma_inv = torch.linalg.pinv(Sigma + eps * eye)  # [B, d, d]
 
     # Compute Mahalanobis distance: Δ_i = (v_gt[i] - mu[i])^T Sigma_inv[i] (v_gt[i] - mu[i])
+    # Use safer einsum that works even when B=1
     diff = (v_gt - mu).unsqueeze(-1)  # [B, d, 1]
-    mah2 = torch.einsum('bdi,bij,bjk->bk', diff.transpose(1, 2), Sigma_inv, diff)
-    mah2 = mah2.squeeze(-1).squeeze(-1)  # [B]
+    mah2 = torch.einsum('bid,bdc,bcd->b', diff.transpose(1, 2), Sigma_inv, diff)  # [B]
 
     # Test coverage for each alpha
     coverage = {}

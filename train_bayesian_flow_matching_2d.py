@@ -94,13 +94,21 @@ def main():
 
     # Use separate parameter groups to prevent weight decay on variance parameters
     # Weight decay on variance parameters pushes std → 0 (posterior collapse)
+    # Explicit grouping:
+    #   no_decay: all variance params (W_logsig, b_logsig), likelihood scale, conventional biases
+    #   decay: all mean parameters (W_mu, b_mu) and backbone weights
     no_decay = []
     decay = []
     for name, param in flow.named_parameters():
-        if ('logsig' in name) or ('bias' in name) or ('log_sigma_likelihood' in name):
+        # Exclude from weight decay: variance parameters + likelihood scale + biases
+        if any(k in name for k in ['W_logsig', 'b_logsig', 'log_sigma_likelihood']) or name.endswith('bias'):
             no_decay.append(param)
         else:
+            # Apply weight decay to: mean parameters + backbone weights
             decay.append(param)
+
+    print(f"  Parameters with weight decay: {len(decay)}")
+    print(f"  Parameters without weight decay: {len(no_decay)}")
 
     optimizer = torch.optim.AdamW([
         {'params': decay, 'weight_decay': 1e-4},
@@ -182,6 +190,13 @@ def main():
 
     flow.eval()
 
+    # Extract learned sigma_likelihood for checkpoint
+    # (evaluator will use this for predictive coverage by default)
+    with torch.no_grad():
+        sigma_like_learned = float(torch.exp(flow.log_sigma_likelihood))
+
+    print(f"\nFinal learned σ_likelihood: {sigma_like_learned:.4f}")
+
     # Save model with configuration
     checkpoint = {
         'state_dict': flow.state_dict(),
@@ -191,13 +206,13 @@ def main():
             'hidden_dim': args.hidden_dim,
             'num_layers': args.num_layers,
             'sigma_p': args.sigma_prior,
-            'init_sigma_likelihood': args.sigma_likelihood,  # For model initialization
-            'sigma_likelihood': args.sigma_likelihood,  # Fixed training hyperparameter for coverage evaluation
+            'init_sigma_likelihood': args.sigma_likelihood,  # Initial value for model initialization
+            'sigma_likelihood': sigma_like_learned,  # LEARNED value for predictive coverage evaluation
             'dropout_p': args.dropout_p,  # MC dropout probability
         }
     }
     torch.save(checkpoint, Path(args.output_dir) / "ckpt.pth")
-    print(f"\nModel saved to {Path(args.output_dir) / 'ckpt.pth'}")
+    print(f"Model saved to {Path(args.output_dir) / 'ckpt.pth'}")
 
     # Plot learning curves
     print("\nPlotting learning curves...")
