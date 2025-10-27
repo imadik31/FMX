@@ -216,9 +216,10 @@ class BayesianMLP(nn.Module):
         feats = self.feat_norm(feats)
 
         # Apply MC dropout if training or use_mc_dropout flag is set
-        # This makes epistemic uncertainty input-dependent
+        # Force dropout to be active by using F.dropout with training=True
+        # (nn.Dropout respects self.training, so we need F.dropout to override)
         if self.training or self.use_mc_dropout:
-            feats = self.dropout_last(feats)
+            feats = F.dropout(feats, p=self.dropout_last.p, training=True)
 
         return feats
 
@@ -237,21 +238,15 @@ class BayesianMLP(nn.Module):
         Returns:
             Velocity predictions [n_mc, batch_size, dim]
         """
-        # Enable MC dropout during sampling (even in eval mode)
-        was_training = self.training
-        self.eval()
+        # Enable MC dropout during sampling
+        # (F.dropout with training=True works regardless of module mode)
         self.use_mc_dropout = True
 
         # Collect n_mc samples with different dropout masks + weight samples
-        samples = []
-        for _ in range(n_mc):
-            feats = self.encode(x_t, t)
-            samples.append(self.head.sample_forward(feats))
+        samples = [self.head.sample_forward(self.encode(x_t, t)) for _ in range(n_mc)]
 
-        # Restore original state
+        # Restore state
         self.use_mc_dropout = False
-        if was_training:
-            self.train()
 
         return torch.stack(samples, dim=0)
 

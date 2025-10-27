@@ -97,7 +97,7 @@ def main():
     no_decay = []
     decay = []
     for name, param in flow.named_parameters():
-        if 'logsig' in name or 'bias' in name or 'log_sigma_like' in name:
+        if ('logsig' in name) or ('bias' in name) or ('log_sigma_likelihood' in name):
             no_decay.append(param)
         else:
             decay.append(param)
@@ -139,15 +139,16 @@ def main():
         v_pred_mc = flow.forward_sample(x_t, t, n_mc=args.n_mc_train)  # [n_mc, B, d]
 
         # Compute ELBO loss
-        # L = MSE/(2*sigma_l^2) + 0.5*log(sigma_l^2) + beta * KL(q||p) / num_params
+        # L = MSE/(2*sigma_l^2) + log(sigma_l) + beta * KL(q||p) / num_params
         # Using learnable log_sigma_likelihood prevents posterior collapse
         mse = ((v_pred_mc - dx_t).pow(2)).mean()
         kl_raw = flow.kl_divergence()
         kl = kl_raw / flow.num_head_params  # Normalize by number of parameters
 
         # Negative log-likelihood with learnable noise scale
+        # NLL = 0.5 * MSE/σ² + log(σ)  (up to constant)
         sigma2 = torch.exp(2.0 * flow.log_sigma_likelihood)
-        nll = 0.5 * mse / sigma2 + 0.5 * flow.log_sigma_likelihood
+        nll = 0.5 * mse / sigma2 + flow.log_sigma_likelihood  # Fixed: was 0.5 * log_sigma
 
         loss = nll + beta_t * kl
 
