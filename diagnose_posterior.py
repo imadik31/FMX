@@ -56,8 +56,6 @@ def test_posterior_sampling():
     ).to(device)
 
     model.load_state_dict(state_dict)
-    model.eval()
-
     print(f"Model loaded: hidden_dim={config['hidden_dim']}, num_layers={config['num_layers']}")
 
     # Check posterior parameters

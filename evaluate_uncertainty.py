@@ -171,8 +171,6 @@ def compute_uncertainty_error_correlation(
     if device is None:
         device = next(model.parameters()).device
 
-    model.eval()
-
     # Sample test data
     print(f"Sampling {n_samples} test points...")
     x_1 = dataset.sample(n_samples)
@@ -271,8 +269,6 @@ def compute_coverage_calibration(
 
     if alphas is None:
         alphas = [0.5, 0.68, 0.8, 0.9, 0.95]
-
-    model.eval()
 
     # Sample test data
     print(f"\nSampling {n_samples} test points for calibration...")
@@ -522,7 +518,6 @@ def main():
     ).to(device)
 
     model.load_state_dict(state_dict)
-    model.eval()
     print(f"Loaded model: hidden_dim={config['hidden_dim']}, num_layers={config['num_layers']}")
 
     # 1. Analyze posterior statistics

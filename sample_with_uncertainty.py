@@ -61,7 +61,6 @@ def sample_with_uncertainty(
         std: Standard deviation (epistemic uncertainty) [batch_size, dim]
         samples: All posterior samples [n_posterior_samples, batch_size, dim]
     """
-    model.eval()
     all_samples = []
 
     for _ in range(n_posterior_samples):
@@ -213,7 +212,6 @@ def analyze_trajectory_uncertainty(
     # Collect trajectories for each posterior sample
     all_trajectories = []  # [K, n_traj, n_steps, dim]
 
-    model.eval()
     for k in tqdm(range(n_posterior), desc="Posterior samples"):
         wrapped = BayesianODEWrapper(model, use_mean=False)
         solver = ODESolver(wrapped)
@@ -394,7 +392,6 @@ def main():
     ).to(device)
 
     model.load_state_dict(state_dict)
-    model.eval()
     print(f"Loaded model from {args.checkpoint}")
 
     # Visualize uncertainty in samples
