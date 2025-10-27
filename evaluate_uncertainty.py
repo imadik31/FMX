@@ -17,13 +17,111 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from scipy.stats import spearmanr
+from scipy.stats import chi2, spearmanr
 from torch import Tensor
 from tqdm import tqdm
 
 from flow_matching.datasets import TOY_DATASETS
 from flow_matching.models.bayesian import BayesianMLP
 from flow_matching.utils import set_seed
+
+
+def joint_coverage_from_samples(
+    V: Tensor,
+    v_gt: Tensor,
+    alphas: list,
+    add_likelihood_sigma: float = None,
+) -> dict:
+    """
+    Compute joint multivariate coverage using Mahalanobis distance.
+
+    Tests if ground truth falls within α-credible ellipsoid defined by
+    the posterior covariance. This is the correct way to evaluate
+    calibration for vector-valued predictions.
+
+    Args:
+        V: Posterior samples [K, B, d]
+        v_gt: Ground truth velocities [B, d]
+        alphas: List of credible levels (e.g., [0.5, 0.8, 0.95])
+        add_likelihood_sigma: If not None, add σ²I to covariance (predictive coverage)
+
+    Returns:
+        dict mapping alpha -> observed coverage fraction
+    """
+    K, B, d = V.shape
+
+    # Compute posterior mean and covariance for each sample
+    mu = V.mean(dim=0)  # [B, d]
+
+    # Centered samples
+    V_centered = V - mu.unsqueeze(0)  # [K, B, d]
+
+    # Sample covariance per point: [B, d, d]
+    # Sigma[i] = (1/(K-1)) * sum_k (V[k,i] - mu[i]) (V[k,i] - mu[i])^T
+    Sigma = torch.einsum('kbd,kbe->bde', V_centered, V_centered) / (K - 1 + 1e-9)
+
+    # Add likelihood noise if requested (predictive coverage)
+    if add_likelihood_sigma is not None:
+        eye = torch.eye(d, device=Sigma.device).unsqueeze(0)  # [1, d, d]
+        Sigma = Sigma + (add_likelihood_sigma ** 2) * eye
+
+    # Regularize and invert covariances
+    eps = 1e-6
+    eye = torch.eye(d, device=Sigma.device).unsqueeze(0)
+    Sigma_inv = torch.linalg.inv(Sigma + eps * eye)  # [B, d, d]
+
+    # Compute Mahalanobis distance: Δ_i = (v_gt[i] - mu[i])^T Sigma_inv[i] (v_gt[i] - mu[i])
+    diff = (v_gt - mu).unsqueeze(-1)  # [B, d, 1]
+    mah2 = torch.einsum('bdi,bij,bjk->bk', diff.transpose(1, 2), Sigma_inv, diff)
+    mah2 = mah2.squeeze(-1).squeeze(-1)  # [B]
+
+    # Test coverage for each alpha
+    coverage = {}
+    for alpha in alphas:
+        # Chi-squared threshold for α-credible ellipsoid
+        thresh = chi2.ppf(alpha, df=d)
+
+        # Count points inside ellipsoid
+        inside = (mah2 <= thresh).float()
+        observed = inside.mean().item()
+        coverage[alpha] = observed
+
+    return coverage
+
+
+def marginal_coverage_from_samples(V: Tensor, v_gt: Tensor, alphas: list) -> dict:
+    """
+    Compute marginal (per-dimension) coverage using quantile intervals.
+
+    This ignores cross-dimension correlations and will be anti-conservative
+    (under-report coverage). Kept for comparison with joint coverage.
+
+    Args:
+        V: Posterior samples [K, B, d]
+        v_gt: Ground truth velocities [B, d]
+        alphas: List of credible levels
+
+    Returns:
+        dict mapping alpha -> observed marginal coverage
+    """
+    coverage = {}
+
+    for alpha in alphas:
+        # Compute quantile intervals per dimension
+        lower_q = (1 - alpha) / 2
+        upper_q = 1 - lower_q
+
+        lower = torch.quantile(V, lower_q, dim=0)  # [B, d]
+        upper = torch.quantile(V, upper_q, dim=0)  # [B, d]
+
+        # Check if ground truth is within interval (per dimension)
+        inside = (v_gt >= lower) & (v_gt <= upper)  # [B, d]
+
+        # Average over samples and dimensions
+        observed = inside.float().mean().item()
+        coverage[alpha] = observed
+
+    return coverage
 
 
 def compute_uncertainty_error_correlation(
@@ -158,7 +256,8 @@ def compute_coverage_calibration(
 
     # Test at multiple time points
     time_points = [0.25, 0.5, 0.75]
-    all_coverages = {alpha: [] for alpha in alphas}
+    all_coverages_joint = {alpha: [] for alpha in alphas}
+    all_coverages_marginal = {alpha: [] for alpha in alphas}
 
     for t_val in time_points:
         print(f"\nTesting at t={t_val}...")
@@ -179,35 +278,46 @@ def compute_coverage_calibration(
         V = torch.stack(preds, dim=0).cpu()
         v_gt = v_gt.cpu()
 
-        # For each dimension, compute coverage
+        # Compute JOINT multivariate coverage (correct for d>1)
+        cover_joint = joint_coverage_from_samples(V, v_gt, alphas, add_likelihood_sigma=None)
         for alpha in alphas:
-            # Compute alpha credible interval
-            lower_q = (1 - alpha) / 2
-            upper_q = 1 - lower_q
+            all_coverages_joint[alpha].append(cover_joint[alpha])
 
-            # Quantiles along posterior dimension
-            lower = torch.quantile(V, lower_q, dim=0)  # [B, d]
-            upper = torch.quantile(V, upper_q, dim=0)  # [B, d]
-
-            # Check if ground truth is within interval
-            inside = (v_gt >= lower) & (v_gt <= upper)  # [B, d]
-
-            # Coverage per dimension (average over samples and dims)
-            coverage = inside.float().mean().item()
-            all_coverages[alpha].append(coverage)
+        # Compute MARGINAL per-dimension coverage (for comparison)
+        cover_marginal = marginal_coverage_from_samples(V, v_gt, alphas)
+        for alpha in alphas:
+            all_coverages_marginal[alpha].append(cover_marginal[alpha])
 
     # Average coverage across time points
-    avg_coverages = {alpha: np.mean(covs) for alpha, covs in all_coverages.items()}
+    avg_coverages_joint = {alpha: np.mean(covs) for alpha, covs in all_coverages_joint.items()}
+    avg_coverages_marginal = {alpha: np.mean(covs) for alpha, covs in all_coverages_marginal.items()}
 
     print(f"\n" + "=" * 80)
-    print("Coverage Calibration")
+    print("Coverage Calibration - JOINT (Multivariate Ellipsoid)")
     print("=" * 80)
+    print("This is the CORRECT test for vector-valued predictions.")
     print(f"{'Alpha':>6} | {'Expected':>8} | {'Observed':>8} | {'Diff':>7}")
     print("-" * 80)
 
     for alpha in alphas:
         expected = alpha
-        observed = avg_coverages[alpha]
+        observed = avg_coverages_joint[alpha]
+        diff = observed - expected
+        status = "✓" if abs(diff) < 0.05 else "⚠" if abs(diff) < 0.1 else "✗"
+        print(f"{status} {alpha:>4.2f} | {expected:>8.3f} | {observed:>8.3f} | {diff:>+7.3f}")
+
+    print("=" * 80)
+
+    print(f"\n" + "=" * 80)
+    print("Coverage Calibration - MARGINAL (Per-Dimension)")
+    print("=" * 80)
+    print("This ignores correlations and will under-report coverage (for comparison).")
+    print(f"{'Alpha':>6} | {'Expected':>8} | {'Observed':>8} | {'Diff':>7}")
+    print("-" * 80)
+
+    for alpha in alphas:
+        expected = alpha
+        observed = avg_coverages_marginal[alpha]
         diff = observed - expected
         status = "✓" if abs(diff) < 0.05 else "⚠" if abs(diff) < 0.1 else "✗"
         print(f"{status} {alpha:>4.2f} | {expected:>8.3f} | {observed:>8.3f} | {diff:>+7.3f}")
@@ -216,8 +326,10 @@ def compute_coverage_calibration(
 
     return {
         'alphas': alphas,
-        'coverages': avg_coverages,
-        'all_coverages': all_coverages,
+        'coverages_joint': avg_coverages_joint,
+        'coverages_marginal': avg_coverages_marginal,
+        'all_coverages_joint': all_coverages_joint,
+        'all_coverages_marginal': all_coverages_marginal,
     }
 
 
@@ -409,7 +521,8 @@ def main():
             'rho': correlation_results['rho'],
             'p_value': correlation_results['p_value'],
         },
-        'calibration': calibration_results['coverages'],
+        'calibration_joint': calibration_results['coverages_joint'],
+        'calibration_marginal': calibration_results['coverages_marginal'],
     }
 
     import json
