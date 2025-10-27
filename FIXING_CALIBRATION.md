@@ -7,40 +7,56 @@ Your results show severe under-calibration:
 - **Coverage ~3-10%** instead of 50-95%: Posterior is way too confident
 - **KL decreased** from 1600 → 710: Posterior collapsed during training
 
-## Root Causes
+## Root Causes & Fixes
 
-1. **β is too large** (1e-4), causing over-regularization. The posterior variance was squeezed too tight during training.
-2. **Coverage test was flawed** (FIXED): Previous test used per-dimension marginal intervals which systematically under-report coverage. Now uses correct joint multivariate ellipsoid test.
+1. **KL not normalized by parameter count** (FIXED ✓)
+   - Previous: `kl = sum over all parameters` (~1600 for your model)
+   - Now: `kl = (sum over all parameters) / num_params` (~1.5)
+   - **Ratio**: 1600 / 1024 ≈ 1.56 per parameter
+   - **Impact**: With β=1e-4, old effective regularization was ~0.16!
 
-**Note**: After fixing the coverage test, your coverage numbers will be HIGHER. But the negative Spearman ρ still indicates β needs to be reduced.
+2. **Coverage test was flawed** (FIXED ✓)
+   - Previous: per-dimension marginal intervals
+   - Now: joint multivariate ellipsoid test
+   - **Impact**: Coverage numbers will be HIGHER (more accurate)
+
+3. **β may need re-tuning**
+   - Old β=1e-4 was actually acting like β≈0.16 due to no normalization
+   - New β=1e-4 × 1.5 ≈ 0.00015 effective regularization
+   - **Recommendation**: Try β=0.05-0.2 with normalized KL
 
 ## Quick Fixes
 
-### Fix 1: Reduce β (RECOMMENDED)
+### Fix 1: Retrain with Normalized KL (REQUIRED)
+
+Your old model was trained without KL normalization. Pull the fixes and retrain:
 
 ```bash
+git pull --ff-only  # Get the normalization fix
+
 python train_bayesian_flow_matching_2d.py \
     --dataset checkerboard \
-    --beta 1e-5 \              # 10x smaller!
+    --beta 0.1 \               # Start with 0.1 (was effectively 0.16 before)
     --iterations 20000 \
-    --beta-warmup-steps 5000   # Longer warmup
+    --beta-warmup-steps 5000
 ```
 
-**Expected improvements:**
+**Expected behavior:**
+- KL/p (per-parameter) should be ~1-2, not ~1600
 - Positive ρ (0.2-0.4)
-- Coverage closer to expected (within ±10%)
-- Higher posterior std
+- Joint coverage within ±10% of expected
+- W_std stays > 0.15
 
-### Fix 2: Even Smaller β
+### Fix 2: Lower β if Still Over-Regularized
 
-If Fix 1 doesn't work, try:
+If Fix 1 still shows collapsing (W_std < 0.10):
 
 ```bash
 python train_bayesian_flow_matching_2d.py \
     --dataset checkerboard \
-    --beta 1e-6 \              # Very small
+    --beta 0.01 \              # Lower
     --iterations 20000 \
-    --beta-warmup-steps 10000  # Long warmup
+    --beta-warmup-steps 5000
 ```
 
 ### Fix 3: No Warmup (Debug)
@@ -57,29 +73,45 @@ python train_bayesian_flow_matching_2d.py \
 
 ## Monitoring Training
 
-With the updated training script, you'll see:
+With the updated training script (KL normalized), you'll see:
 
 ```
-| step:   2000 | loss:   2.28 | mse:   4.25 | kl:  1600.67 | beta: 0.000010 | W_std: 0.1500 | b_std: 0.0100 |
+Model architecture:
+  Bayesian head parameters: 1026
+  (KL will be normalized by this count)
+
+| step:   2000 | loss:   2.28 | mse:   4.25 | kl/p:  1.5623 | beta: 0.100000 | W_std: 0.1500 | b_std: 0.0100 |
 ```
+
+**Key differences from old version:**
+- **kl/p** instead of **kl**: Now per-parameter (~1.5 instead of ~1600)
+- **β range**: Now 0.01-0.5 instead of 1e-5 to 1e-3
+- **Scale**: β × kl/p ≈ 0.15 for β=0.1, kl/p=1.5
 
 **Watch for:**
-1. **W_std should stay > 0.10** throughout training
-   - If it drops below 0.05, β is too large
-2. **KL should stabilize**, not keep decreasing
-   - Decreasing KL → posterior is collapsing
+1. **W_std should stay > 0.15** throughout training
+   - If it drops below 0.10, β is too large
+2. **KL/p should stabilize** around 1-2, not keep decreasing
+   - Decreasing KL/p → posterior is collapsing
 3. **β schedule**: Should reach full value slowly
-   - With β=1e-5, warmup=5k, reaches full β at step 5000
+   - With β=0.1, warmup=5k, reaches full β at step 5000
 
-## Understanding β Values
+## Understanding β Values (with KL normalization)
 
+**OLD (without normalization):**
+| β Value | Effective |
+|---------|-----------|
+| 1e-4 | ~0.16 |
+| 1e-5 | ~0.016 |
+
+**NEW (with normalization):**
 | β Value | Effect | Use When |
 |---------|--------|----------|
-| 1e-3 | Very strong regularization | Large datasets, want strong priors |
-| 1e-4 | Strong regularization | Default, but often too strong |
-| 1e-5 | **Moderate (RECOMMENDED)** | Most cases, good starting point |
-| 1e-6 | Weak regularization | Small datasets, need flexibility |
-| 1e-7 | Very weak | Almost like deterministic training |
+| 0.5 | Very strong regularization | Large datasets, strong priors |
+| 0.2 | Strong regularization | Standard case |
+| 0.1 | **Moderate (RECOMMENDED)** | Start here |
+| 0.05 | Weak regularization | Need more flexibility |
+| 0.01 | Very weak | Almost deterministic |
 
 ## After Retraining
 
