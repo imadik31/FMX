@@ -7,9 +7,12 @@ Your results show severe under-calibration:
 - **Coverage ~3-10%** instead of 50-95%: Posterior is way too confident
 - **KL decreased** from 1600 → 710: Posterior collapsed during training
 
-## Root Cause
+## Root Causes
 
-**β is too large** (1e-4), causing over-regularization. The posterior variance was squeezed too tight during training.
+1. **β is too large** (1e-4), causing over-regularization. The posterior variance was squeezed too tight during training.
+2. **Coverage test was flawed** (FIXED): Previous test used per-dimension marginal intervals which systematically under-report coverage. Now uses correct joint multivariate ellipsoid test.
+
+**Note**: After fixing the coverage test, your coverage numbers will be HIGHER. But the negative Spearman ρ still indicates β needs to be reduced.
 
 ## Quick Fixes
 
@@ -95,8 +98,27 @@ python evaluate_uncertainty.py \
 
 **Target metrics:**
 - ✓ Spearman ρ > 0.2 (positive correlation)
-- ✓ Coverage within ±10% of expected
+- ✓ Joint coverage within ±10% of expected
 - ✓ W_std > 0.10 at end of training
+
+## Understanding Joint vs Marginal Coverage
+
+**Joint (Multivariate Ellipsoid)**: CORRECT test for d>1
+- Tests if ground truth falls within α-credible ellipsoid
+- Uses Mahalanobis distance: Δ = (v - μ)ᵀ Σ⁻¹ (v - μ)
+- Threshold: Δ ≤ χ²_{d,α}
+- Accounts for correlations between dimensions
+
+**Marginal (Per-Dimension)**: INCORRECT but kept for comparison
+- Tests if each dimension separately falls in α-credible interval
+- Ignores correlations between dimensions
+- Systematically under-reports coverage (anti-conservative)
+- Box region ⊆ Ellipsoid region
+
+**Expected behavior:**
+- Marginal coverage ≤ Joint coverage
+- Difference increases with stronger correlations
+- Both should be close to expected α for well-calibrated model
 
 ## Advanced: Adaptive β
 
